@@ -1,0 +1,45 @@
+{
+  "name": "actionauto-tray",
+  "version": "1.0.0",
+  "description": "Action Auto TimeProof Tray Agent",
+  "main": "dist/main.js",
+  "author": "Action Auto",
+  "license": "ISC",
+  "type": "commonjs",
+  "scripts": {
+    "start": "tsc && electron .",
+    "dev": "tsc && electron .",
+    "build": "tsc && electron-builder --win --x64"
+  },
+  "dependencies": {
+    "auto-launch": "^5.0.6",
+    "axios": "^1.16.1",
+    "electron": "^42.0.1",
+    "electron-store": "^11.0.2",
+    "form-data": "^4.0.5",
+    "keytar": "^7.9.0",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.9.3"
+  },
+  "build": {
+    "appId": "com.actionauto.tray",
+    "productName": "Action Auto Tray",
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "files": [
+      "dist/**/*",
+      "src/renderer/**/*",
+      "assets/**/*"
+    ]
+  }
+}

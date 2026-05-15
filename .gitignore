@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# TypeScript compiled output
+dist/
+
+# electron-builder output
+release/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.local

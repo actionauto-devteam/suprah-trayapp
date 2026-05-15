@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Action Auto — Sign In</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0c0c0c;
+      color: #e5e5e5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      user-select: none;
+      overflow: hidden;
+    }
+
+    /* Drag region */
+    .drag-bar {
+      -webkit-app-region: drag;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding: 0 12px;
+      background: #0c0c0c;
+      border-bottom: 1px solid #1a1a1a;
+      flex-shrink: 0;
+    }
+
+    .close-btn {
+      -webkit-app-region: no-drag;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #3a3a3a;
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .close-btn:hover { background: #ff5f57; }
+
+    /* Main content */
+    .content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 32px 40px;
+      gap: 0;
+    }
+
+    /* Logo / brand */
+    .brand {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .logo-ring {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #16a34a, #15803d);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 0 1px rgba(22,163,74,0.3), 0 8px 24px rgba(22,163,74,0.2);
+    }
+
+    .logo-ring svg { width: 26px; height: 26px; }
+
+    .brand-name {
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      color: #f5f5f5;
+    }
+
+    .brand-sub {
+      font-size: 10px;
+      color: #555;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      font-weight: 600;
+      margin-top: -6px;
+    }
+
+    /* Form */
+    form { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+
+    .field { display: flex; flex-direction: column; gap: 5px; }
+
+    label {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #555;
+    }
+
+    input {
+      width: 100%;
+      background: #161616;
+      border: 1px solid #262626;
+      border-radius: 8px;
+      padding: 10px 13px;
+      font-size: 13px;
+      color: #e5e5e5;
+      outline: none;
+      transition: border-color 0.15s;
+      font-family: inherit;
+    }
+
+    input:focus { border-color: #16a34a; }
+    input::placeholder { color: #383838; }
+
+    .error-msg {
+      font-size: 11px;
+      color: #f87171;
+      text-align: center;
+      min-height: 16px;
+      font-weight: 500;
+    }
+
+    .submit-btn {
+      width: 100%;
+      padding: 11px;
+      border-radius: 8px;
+      background: #16a34a;
+      border: none;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.15s, opacity 0.15s;
+      font-family: inherit;
+      letter-spacing: 0.02em;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+    }
+
+    .submit-btn:hover:not(:disabled) { background: #15803d; }
+    .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .remember-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: -2px;
+    }
+
+    .remember-row input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      accent-color: #16a34a;
+      cursor: pointer;
+      flex-shrink: 0;
+      padding: 0;
+      border: none;
+      background: none;
+    }
+
+    .remember-row label {
+      font-size: 11px;
+      font-weight: 500;
+      color: #555;
+      text-transform: none;
+      letter-spacing: 0;
+      cursor: pointer;
+    }
+
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      display: none;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Footer */
+    .footer {
+      text-align: center;
+      font-size: 10px;
+      color: #333;
+      padding: 12px 0 16px;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="drag-bar">
+    <button class="close-btn" id="closeBtn"></button>
+  </div>
+
+  <div class="content">
+    <div class="brand">
+      <div class="logo-ring">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+      </div>
+      <div>
+        <p class="brand-name">Action Auto</p>
+        <p class="brand-sub">Tray Agent</p>
+      </div>
+    </div>
+
+    <form id="loginForm">
+      <div class="field">
+        <label for="email">Email</label>
+        <input type="email" id="email" placeholder="your@email.com" autocomplete="email" required />
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <input type="password" id="password" placeholder="••••••••" autocomplete="current-password" required />
+      </div>
+
+      <div class="remember-row">
+        <input type="checkbox" id="rememberMe" />
+        <label for="rememberMe">Remember me</label>
+      </div>
+
+      <p class="error-msg" id="errorMsg"></p>
+
+      <button type="submit" class="submit-btn" id="submitBtn">
+        <div class="spinner" id="spinner"></div>
+        <span id="btnText">Sign In</span>
+      </button>
+    </form>
+  </div>
+
+  <div class="footer">Action Auto CRM — TimeProof Agent v1.0.0</div>
+
+  <script>
+    document.getElementById('closeBtn').addEventListener('click', () => window.close());
+
+    const form = document.getElementById('loginForm');
+    const errorMsg = document.getElementById('errorMsg');
+    const submitBtn = document.getElementById('submitBtn');
+    const spinner = document.getElementById('spinner');
+    const btnText = document.getElementById('btnText');
+    const rememberMe = document.getElementById('rememberMe');
+
+    // Pre-fill saved email
+    const savedEmail = localStorage.getItem('rememberedEmail');
+    if (savedEmail) {
+      document.getElementById('email').value = savedEmail;
+      rememberMe.checked = true;
+    }
+
+    const setLoading = (loading) => {
+      submitBtn.disabled = loading;
+      spinner.style.display = loading ? 'block' : 'none';
+      btnText.textContent = loading ? 'Signing in…' : 'Sign In';
+    };
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorMsg.textContent = '';
+
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+
+      if (!email || !password) return;
+
+      if (rememberMe.checked) {
+        localStorage.setItem('rememberedEmail', email);
+      } else {
+        localStorage.removeItem('rememberedEmail');
+      }
+
+      setLoading(true);
+
+      try {
+        const result = await window.trayAPI.login(email, password);
+        if (!result.success) {
+          errorMsg.textContent = result.error || 'Invalid email or password';
+        }
+      } catch (err) {
+        errorMsg.textContent = 'Could not connect. Check your internet.';
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    // Listen for auth errors from main process
+    window.trayAPI.onAuthError((msg) => {
+      errorMsg.textContent = msg;
+    });
+  </script>
+</body>
+</html>
