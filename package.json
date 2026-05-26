@@ -15,7 +15,6 @@
     "auto-launch": "^5.0.6",
     "axios": "^1.16.1",
     "dotenv": "^17.4.2",
-    "electron": "^42.0.1",
     "electron-store": "^11.0.2",
     "form-data": "^4.0.5",
     "keytar": "^7.9.0",
@@ -23,6 +22,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.19",
+    "electron": "^42.0.1",
     "electron-builder": "^26.0.12",
     "typescript": "^5.9.3"
   },
@@ -31,7 +31,8 @@
     "productName": "Action Auto Tray",
     "win": {
       "target": "nsis",
-      "icon": "assets/icon.ico"
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": true,
