@@ -257,12 +257,13 @@
     const btnText = document.getElementById('btnText');
     const rememberMe = document.getElementById('rememberMe');
 
-    // Pre-fill saved username
-    const savedUsername = localStorage.getItem('rememberedUsername');
-    if (savedUsername) {
-      document.getElementById('username').value = savedUsername;
-      rememberMe.checked = true;
-    }
+    // Pre-fill saved username from electron-store (persists across restarts)
+    window.trayAPI.getRememberedUsername().then((savedUsername) => {
+      if (savedUsername) {
+        document.getElementById('username').value = savedUsername;
+        rememberMe.checked = true;
+      }
+    });
 
     const setLoading = (loading) => {
       submitBtn.disabled = loading;
@@ -279,11 +280,7 @@
 
       if (!username || !password) return;
 
-      if (rememberMe.checked) {
-        localStorage.setItem('rememberedUsername', username);
-      } else {
-        localStorage.removeItem('rememberedUsername');
-      }
+      await window.trayAPI.setRememberedUsername(rememberMe.checked ? username : null);
 
       setLoading(true);
 

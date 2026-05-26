@@ -571,6 +571,12 @@ ipcMain.handle('auth:login', async (_e, { username, password }: { username: stri
 
 ipcMain.handle('auth:logout', handleLogout);
 
+ipcMain.handle('remember:get', () => store.get('rememberedUsername') as string | undefined ?? null);
+ipcMain.handle('remember:set', (_e, username: string | null) => {
+  if (username) store.set('rememberedUsername', username);
+  else store.delete('rememberedUsername');
+});
+
 ipcMain.handle('status:get', () => agentState);
 
 ipcMain.handle('app:open-crm', () => shell.openExternal(CRM_URL));

@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('trayAPI', {
   onAuthError: (cb: (msg: string) => void) =>
     ipcRenderer.on('auth:error', (_e: IpcRendererEvent, msg: string) => cb(msg)),
 
+  // Remember Me (persisted via electron-store, not localStorage)
+  getRememberedUsername: () => ipcRenderer.invoke('remember:get'),
+  setRememberedUsername: (username: string | null) => ipcRenderer.invoke('remember:set', username),
+
   // Remove listeners on cleanup
   removeAllListeners: (channel: string) => ipcRenderer.removeAllListeners(channel),
 });
