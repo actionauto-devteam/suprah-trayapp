@@ -222,8 +222,8 @@
 
     <form id="loginForm">
       <div class="field">
-        <label for="email">Email</label>
-        <input type="email" id="email" placeholder="your@email.com" autocomplete="email" required />
+        <label for="username">Employee ID</label>
+        <input type="text" id="username" placeholder="2025-0001" autocomplete="username" required />
       </div>
 
       <div class="field">
@@ -257,10 +257,10 @@
     const btnText = document.getElementById('btnText');
     const rememberMe = document.getElementById('rememberMe');
 
-    // Pre-fill saved email
-    const savedEmail = localStorage.getItem('rememberedEmail');
-    if (savedEmail) {
-      document.getElementById('email').value = savedEmail;
+    // Pre-fill saved username
+    const savedUsername = localStorage.getItem('rememberedUsername');
+    if (savedUsername) {
+      document.getElementById('username').value = savedUsername;
       rememberMe.checked = true;
     }
 
@@ -274,23 +274,23 @@
       e.preventDefault();
       errorMsg.textContent = '';
 
-      const email = document.getElementById('email').value.trim();
+      const username = document.getElementById('username').value.trim();
       const password = document.getElementById('password').value;
 
-      if (!email || !password) return;
+      if (!username || !password) return;
 
       if (rememberMe.checked) {
-        localStorage.setItem('rememberedEmail', email);
+        localStorage.setItem('rememberedUsername', username);
       } else {
-        localStorage.removeItem('rememberedEmail');
+        localStorage.removeItem('rememberedUsername');
       }
 
       setLoading(true);
 
       try {
-        const result = await window.trayAPI.login(email, password);
+        const result = await window.trayAPI.login(username, password);
         if (!result.success) {
-          errorMsg.textContent = result.error || 'Invalid email or password';
+          errorMsg.textContent = result.error || 'Invalid Employee ID or password';
         }
       } catch (err) {
         errorMsg.textContent = 'Could not connect. Check your internet.';

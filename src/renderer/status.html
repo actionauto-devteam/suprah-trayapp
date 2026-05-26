@@ -166,27 +166,9 @@
       color: #f0f0f0;
     }
 
-    .timer-value.break { color: #fb923c; }
-    .timer-value.idle  { color: #71717a; }
-
-    .screenshot-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-
-    .screenshot-label {
-      font-size: 10px;
-      color: #333;
-      font-weight: 600;
-    }
-
-    .screenshot-val {
-      font-size: 11px;
-      font-weight: 700;
-      color: #3f3f3f;
-      font-variant-numeric: tabular-nums;
-    }
+    .timer-value.break      { color: #fb923c; }
+    .timer-value.over-break { color: #f87171; }
+    .timer-value.idle       { color: #71717a; }
 
     /* Actions */
     .actions {
@@ -229,6 +211,43 @@
       border: 1px solid #1e1e1e;
     }
     .btn-danger:hover { color: #f87171; border-color: rgba(248,113,113,0.2); }
+
+    .btn-break {
+      background: rgba(251,146,60,0.06);
+      color: #fb923c;
+      border: 1px solid rgba(251,146,60,0.18);
+    }
+    .btn-break:hover { background: rgba(251,146,60,0.12); }
+
+    .btn-resume {
+      background: rgba(74,222,128,0.06);
+      color: #4ade80;
+      border: 1px solid rgba(74,222,128,0.18);
+    }
+    .btn-resume:hover { background: rgba(74,222,128,0.12); }
+
+    .btn-end-shift {
+      background: transparent;
+      color: #444;
+      border: 1px solid #1e1e1e;
+      font-size: 11px;
+    }
+    .btn-end-shift:hover { color: #f87171; border-color: rgba(248,113,113,0.2); }
+
+    .btn-row {
+      display: flex;
+      gap: 6px;
+    }
+    .btn-row .btn { width: auto; flex: 1; }
+
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .action-msg {
+      font-size: 10px;
+      text-align: center;
+      color: #444;
+      min-height: 13px;
+    }
   </style>
 </head>
 <body>
@@ -255,44 +274,42 @@
     <!-- Timers -->
     <div class="timers">
       <div class="timer-row">
-        <span class="timer-label">Shift Time</span>
-        <span class="timer-value" id="shiftTimer">--:--:--</span>
+        <span class="timer-label">Work Time</span>
+        <span class="timer-value" id="shiftTimer">00:00:00</span>
       </div>
       <div class="timer-row" id="breakRow" style="display:none">
-        <span class="timer-label">Break Time</span>
+        <span class="timer-label">Total Break</span>
         <span class="timer-value break" id="breakTimer">--:--:--</span>
-      </div>
-      <div class="screenshot-row" id="screenshotRow" style="display:none">
-        <span class="screenshot-label">Next screenshot in</span>
-        <span class="screenshot-val" id="screenshotCountdown">--:--</span>
       </div>
     </div>
 
     <!-- Actions -->
     <div class="actions">
-      <button class="btn btn-primary" id="openCrmBtn">Open CRM</button>
-      <button class="btn btn-danger" id="signOutBtn">Sign Out</button>
+      <button class="btn btn-primary" id="startShiftBtn" style="display:none">Start Shift</button>
+      <div class="btn-row" id="shiftActions" style="display:none">
+        <button class="btn btn-break" id="breakBtn">Break</button>
+        <button class="btn btn-end-shift" id="endShiftBtn">End Shift</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-ghost" id="openCrmBtn">Open CRM</button>
+        <button class="btn btn-danger" id="signOutBtn">Sign Out</button>
+      </div>
+      <p class="action-msg" id="actionMsg"></p>
     </div>
 
   </div>
 
   <script>
     let state = {};
-    let shiftInterval = null;
+    let timerInterval = null;
     let breakInterval = null;
-    let screenshotInterval = null;
 
     const fmt = (totalSec) => {
-      const h = Math.floor(totalSec / 3600);
-      const m = Math.floor((totalSec % 3600) / 60);
-      const s = totalSec % 60;
-      return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-    };
-
-    const fmtMM = (totalSec) => {
-      const m = Math.floor(totalSec / 60);
-      const s = totalSec % 60;
-      return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+      const s = Math.max(0, Math.floor(totalSec));
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
     };
 
     const initials = (name) => {
@@ -300,31 +317,24 @@
       return name.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
     };
 
-    const startShiftTimer = () => {
-      if (!state.shiftStartedAt) return;
-      clearInterval(shiftInterval);
-      shiftInterval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - new Date(state.shiftStartedAt).getTime()) / 1000);
-        document.getElementById('shiftTimer').textContent = fmt(elapsed);
-      }, 1000);
+    // Activity-based work timer: counts only completed intervals + live interval
+    const updateWorkTimer = () => {
+      const prevMs = state.todayTotalActiveMs || 0;
+      const liveMs = state.activityStartMs
+        ? Math.max(0, Date.now() - state.activityStartMs)
+        : 0;
+      document.getElementById('shiftTimer').textContent = fmt(Math.floor((prevMs + liveMs) / 1000));
     };
 
-    const startBreakTimer = () => {
-      if (!state.breakStartedAt) return;
-      clearInterval(breakInterval);
-      breakInterval = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - new Date(state.breakStartedAt).getTime()) / 1000);
-        document.getElementById('breakTimer').textContent = fmt(elapsed);
-      }, 1000);
-    };
-
-    const startScreenshotCountdown = () => {
-      clearInterval(screenshotInterval);
-      screenshotInterval = setInterval(() => {
-        if (!state.nextScreenshotIn) return;
-        const remaining = Math.max(0, Math.floor((new Date(state.nextScreenshotIn).getTime() - Date.now()) / 1000));
-        document.getElementById('screenshotCountdown').textContent = fmtMM(remaining);
-      }, 1000);
+    const updateBreakDisplay = () => {
+      const liveSec = state.breakStartedAt
+        ? Math.floor((Date.now() - new Date(state.breakStartedAt).getTime()) / 1000)
+        : 0;
+      const totalSec = Math.floor(state.totalBreakSeconds || 0) + liveSec;
+      const el = document.getElementById('breakTimer');
+      if (!el) return;
+      el.textContent = fmt(totalSec);
+      el.className = 'timer-value ' + (totalSec >= 3600 ? 'over-break' : 'break');
     };
 
     const applyState = (s) => {
@@ -339,48 +349,105 @@
       const dot = document.getElementById('agentDot');
       dot.className = 'agent-dot ' + (s.isAgentOnline ? 'online' : 'offline');
 
-      // Status pill
+      // Status pill + timer logic
       const pill = document.getElementById('statusPill');
       const statusDot = document.getElementById('statusDot');
       const statusText = document.getElementById('statusText');
 
-      clearInterval(shiftInterval);
+      clearInterval(timerInterval);
       clearInterval(breakInterval);
-      clearInterval(screenshotInterval);
-
       document.getElementById('breakRow').style.display = 'none';
-      document.getElementById('screenshotRow').style.display = 'none';
-      document.getElementById('shiftTimer').textContent = '--:--:--';
 
       if (s.isOnBreak) {
         pill.className = 'status-pill on-break';
         statusDot.className = 'status-dot pulse';
         statusText.textContent = 'On Break';
         document.getElementById('breakRow').style.display = 'flex';
-        startBreakTimer();
-        if (s.shiftStartedAt) startShiftTimer();
-      } else if (s.isIdle) {
+        updateBreakDisplay();
+        breakInterval = setInterval(updateBreakDisplay, 1000);
+      } else if (s.isOnShift && s.isIdle) {
         pill.className = 'status-pill idle';
         statusDot.className = 'status-dot';
-        statusText.textContent = 'Idle — Screenshots Paused';
-        if (s.shiftStartedAt) startShiftTimer();
+        statusText.textContent = 'Idle — Paused';
       } else if (s.isOnShift) {
         pill.className = 'status-pill on-shift';
         statusDot.className = 'status-dot pulse';
         statusText.textContent = 'On Shift';
-        if (s.shiftStartedAt) startShiftTimer();
-        if (s.nextScreenshotIn) {
-          document.getElementById('screenshotRow').style.display = 'flex';
-          startScreenshotCountdown();
-        }
+      } else if ((s.todayTotalActiveMs || 0) > 0) {
+        pill.className = 'status-pill offline';
+        statusDot.className = 'status-dot';
+        statusText.textContent = 'Shift Complete';
       } else {
         pill.className = 'status-pill offline';
         statusDot.className = 'status-dot';
         statusText.textContent = 'Not Clocked In';
       }
+
+      // Work timer always ticking (pauses automatically when activityStartMs is null)
+      updateWorkTimer();
+      timerInterval = setInterval(updateWorkTimer, 1000);
+
+      updateButtons(s);
     };
 
-    // Buttons
+    const showMsg = (msg, isError = false) => {
+      const el = document.getElementById('actionMsg');
+      el.textContent = msg;
+      el.style.color = isError ? '#f87171' : '#555';
+      setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
+    };
+
+    const updateButtons = (s) => {
+      const startShiftBtn = document.getElementById('startShiftBtn');
+      const shiftActions  = document.getElementById('shiftActions');
+      const breakBtn      = document.getElementById('breakBtn');
+      if (!s.isAuthenticated) {
+        startShiftBtn.style.display = 'none';
+        shiftActions.style.display  = 'none';
+        return;
+      }
+      if (!s.isOnShift) {
+        startShiftBtn.style.display = '';
+        shiftActions.style.display  = 'none';
+      } else {
+        startShiftBtn.style.display = 'none';
+        shiftActions.style.display  = 'flex';
+        if (s.isOnBreak) {
+          breakBtn.textContent = 'Resume';
+          breakBtn.className   = 'btn btn-resume';
+        } else {
+          breakBtn.textContent = 'Break';
+          breakBtn.className   = 'btn btn-break';
+        }
+      }
+    };
+
+    // ── Timeclock button handlers ────────────────────────────────────
+    document.getElementById('startShiftBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('startShiftBtn');
+      btn.disabled = true;
+      const result = await window.trayAPI.timeclockAction('time-in');
+      btn.disabled = false;
+      if (!result.success) showMsg(result.error || 'Failed', true);
+    });
+
+    document.getElementById('breakBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('breakBtn');
+      btn.disabled = true;
+      const type = state.isOnBreak ? 'break-out' : 'break-in';
+      const result = await window.trayAPI.timeclockAction(type);
+      btn.disabled = false;
+      if (!result.success) showMsg(result.error || 'Failed', true);
+    });
+
+    document.getElementById('endShiftBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('endShiftBtn');
+      btn.disabled = true;
+      const result = await window.trayAPI.timeclockAction('time-out');
+      btn.disabled = false;
+      if (!result.success) showMsg(result.error || 'Failed', true);
+    });
+
     document.getElementById('openCrmBtn').addEventListener('click', () => {
       window.trayAPI.openCRM();
     });
@@ -389,10 +456,8 @@
       await window.trayAPI.logout();
     });
 
-    // Listen for state updates from main process
+    // ── State sync ───────────────────────────────────────────────────
     window.trayAPI.onStatusUpdate((data) => applyState(data));
-
-    // Request initial state
     window.trayAPI.getStatus().then(applyState);
   </script>
 </body>

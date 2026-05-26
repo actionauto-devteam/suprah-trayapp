@@ -2,13 +2,14 @@ import { contextBridge, ipcRenderer, IpcRendererEvent } from 'electron';
 
 contextBridge.exposeInMainWorld('trayAPI', {
   // Auth
-  login: (email: string, password: string) =>
-    ipcRenderer.invoke('auth:login', { email, password }),
+  login: (username: string, password: string) =>
+    ipcRenderer.invoke('auth:login', { username, password }),
   logout: () => ipcRenderer.invoke('auth:logout'),
 
   // Status
   getStatus: () => ipcRenderer.invoke('status:get'),
   openCRM: () => ipcRenderer.invoke('app:open-crm'),
+  timeclockAction: (type: string) => ipcRenderer.invoke('timeclock:action', type),
 
   // Events from main → renderer
   onStatusUpdate: (cb: (data: unknown) => void) =>
