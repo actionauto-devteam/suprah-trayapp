@@ -41,6 +41,9 @@
       "dist/**/*",
       "src/renderer/**/*",
       "assets/**/*"
+    ],
+    "extraResources": [
+      { "from": ".env", "to": ".env" }
     ]
   }
 }

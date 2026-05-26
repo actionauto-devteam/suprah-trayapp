@@ -4,7 +4,12 @@ import path from 'path';
 import http from 'http';
 import axios from 'axios';
 import dotenv from 'dotenv';
-dotenv.config({ path: path.join(__dirname, '..', '.env') });
+// In a packaged build, .env lives in extraResources (process.resourcesPath).
+// In dev, it lives at the project root (one level above dist/).
+const envPath = app.isPackaged
+  ? path.join(process.resourcesPath, '.env')
+  : path.join(__dirname, '..', '.env');
+dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat } from './heartbeat';
