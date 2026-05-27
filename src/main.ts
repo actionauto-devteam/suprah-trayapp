@@ -272,11 +272,15 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       });
       const s = data?.data;
       if (!s) return;
-      agentState.isOnShift              = s.isOnShift;
-      agentState.isOnBreak              = s.isOnBreak;
-      agentState.shiftStartedAt         = s.shiftStartedAt ?? null;
-      agentState.breakStartedAt         = s.breakStartedAt ?? null;
-      agentState.totalBreakSeconds      = s.totalBreakSeconds ?? 0;
+      // If the backend says the user is on shift but that shift started on a previous
+      // day (isShiftFromToday=false), treat them as off-shift in the tray. Opening the
+      // app should NOT auto-start the timer for a forgotten clock-out from days ago.
+      const effectivelyOnShift = s.isOnShift && (s.isShiftFromToday !== false);
+      agentState.isOnShift              = effectivelyOnShift;
+      agentState.isOnBreak              = effectivelyOnShift ? s.isOnBreak : false;
+      agentState.shiftStartedAt         = effectivelyOnShift ? (s.shiftStartedAt ?? null) : null;
+      agentState.breakStartedAt         = effectivelyOnShift ? (s.breakStartedAt ?? null) : null;
+      agentState.totalBreakSeconds      = effectivelyOnShift ? (s.totalBreakSeconds ?? 0) : 0;
       agentState.todayTotalWorkedSeconds = s.todayTotalWorkedSeconds ?? 0;
       // Activity-based tracking: pull the authoritative completed-interval total from the server.
       // We do NOT restore activityStartMs from currentIntervalStartAt because that value could
