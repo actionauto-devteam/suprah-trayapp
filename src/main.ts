@@ -4,6 +4,22 @@ import path from 'path';
 import http from 'http';
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { autoUpdater } from 'electron-updater';
+
+// Check for updates silently in the background; install automatically on quit
+autoUpdater.autoDownload = true;
+autoUpdater.autoInstallOnAppQuit = true;
+autoUpdater.logger = null;
+
+autoUpdater.on('update-downloaded', () => {
+  if (Notification.isSupported()) {
+    new Notification({
+      title: 'Update ready',
+      body: 'A new version of Action Auto Tray has been downloaded and will install automatically when you quit.',
+      silent: true,
+    }).show();
+  }
+});
 // In a packaged build, .env lives in extraResources (process.resourcesPath).
 // In dev, it lives at the project root (one level above dist/).
 const envPath = app.isPackaged
@@ -751,6 +767,13 @@ app.whenReady().then(async () => {
   }
 
   createStatusWindow();
+
+  // Check for updates 15s after startup so the app is fully initialized first
+  if (app.isPackaged) {
+    setTimeout(() => {
+      autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    }, 15_000);
+  }
 });
 
 // Keep app running in tray even when all windows are closed

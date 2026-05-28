@@ -1,4 +1,4 @@
-import { desktopCapturer, app } from 'electron';
+import { desktopCapturer, app, nativeImage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
@@ -19,24 +19,61 @@ const toShiftDate = () => {
   return `${mdt.getUTCFullYear()}-${String(mdt.getUTCMonth() + 1).padStart(2, '0')}-${String(mdt.getUTCDate()).padStart(2, '0')}`;
 };
 
+/**
+ * Captures all connected monitors and stitches them horizontally into a single JPEG.
+ * Single-monitor setups follow the same path as before (no stitching overhead).
+ */
+async function captureAllScreens(): Promise<Buffer | null> {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen'],
+    thumbnailSize: { width: 1920, height: 1080 },
+  });
+
+  if (sources.length === 0) return null;
+  if (sources.length === 1) return sources[0].thumbnail.toJPEG(80);
+
+  // Filter out any zero-size thumbnails (disconnected/mirrored displays)
+  const images = sources
+    .map(s => ({ bitmap: s.thumbnail.toBitmap(), size: s.thumbnail.getSize() }))
+    .filter(img => img.size.width > 0 && img.size.height > 0);
+
+  if (images.length === 0) return null;
+  if (images.length === 1) {
+    return nativeImage.createFromBitmap(images[0].bitmap, images[0].size).toJPEG(80);
+  }
+
+  // Stitch monitors side-by-side using raw RGBA bitmap data
+  const totalWidth = images.reduce((sum, img) => sum + img.size.width, 0);
+  const maxHeight = Math.max(...images.map(img => img.size.height));
+
+  // Allocate combined buffer (zeroed = black padding for shorter monitors)
+  const stitched = Buffer.alloc(totalWidth * maxHeight * 4, 0);
+
+  let xOffset = 0;
+  for (const img of images) {
+    for (let y = 0; y < img.size.height; y++) {
+      const srcStart = y * img.size.width * 4;
+      const dstStart = (y * totalWidth + xOffset) * 4;
+      img.bitmap.copy(stitched, dstStart, srcStart, srcStart + img.size.width * 4);
+    }
+    xOffset += img.size.width;
+  }
+
+  const combined = nativeImage.createFromBitmap(stitched, { width: totalWidth, height: maxHeight });
+  // Slightly lower quality for combined image to keep file size reasonable
+  return combined.toJPEG(75);
+}
+
 async function captureAndUpload(): Promise<void> {
   // Skip regular interval captures while idle — one-off idle snapshot is handled separately
   if (getIsIdle()) return;
 
   try {
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: 1920, height: 1080 },
-    });
+    const jpegBuffer = await captureAllScreens();
+    if (!jpegBuffer) return;
 
-    const source = sources[0];
-    if (!source) return;
-
-    const image = source.thumbnail;
     const capturedAt = new Date().toISOString();
     const shiftDate = toShiftDate();
-
-    const jpegBuffer = image.toJPEG(80);
 
     // Try direct upload first
     try {
@@ -76,14 +113,9 @@ async function captureAndUpload(): Promise<void> {
  */
 export async function captureAndUploadOnce(url: string, authToken: string): Promise<void> {
   try {
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: { width: 1920, height: 1080 },
-    });
-    const source = sources[0];
-    if (!source) return;
+    const jpegBuffer = await captureAllScreens();
+    if (!jpegBuffer) return;
 
-    const jpegBuffer = source.thumbnail.toJPEG(80);
     const form = new FormData();
     form.append('screenshot', jpegBuffer, { filename: `${Date.now()}.jpg`, contentType: 'image/jpeg' });
     form.append('shiftDate', toShiftDate());

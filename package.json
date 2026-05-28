@@ -1,6 +1,6 @@
 {
   "name": "actionauto-tray",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Action Auto TimeProof Tray Agent",
   "main": "dist/main.js",
   "author": "Action Auto",
@@ -16,6 +16,7 @@
     "axios": "^1.16.1",
     "dotenv": "^17.4.2",
     "electron-store": "^11.0.2",
+    "electron-updater": "^6.3.9",
     "form-data": "^4.0.5",
     "keytar": "^7.9.0",
     "socket.io-client": "^4.8.3"
@@ -29,6 +30,11 @@
   "build": {
     "appId": "com.actionauto.tray",
     "productName": "Action Auto Tray",
+    "publish": {
+      "provider": "github",
+      "owner": "actionauto-devteam",
+      "repo": "suprah-trayapp"
+    },
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico",
@@ -36,7 +42,8 @@
     },
     "nsis": {
       "oneClick": true,
-      "perMachine": false
+      "perMachine": false,
+      "artifactName": "ActionAutoTraySetup.exe"
     },
     "files": [
       "dist/**/*",
