@@ -248,6 +248,79 @@
       color: #444;
       min-height: 13px;
     }
+
+    /* Modals */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      z-index: 100;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 12px;
+    }
+    .modal-overlay.visible { display: flex; }
+
+    .modal {
+      background: #111;
+      border: 1px solid #262626;
+      border-radius: 14px;
+      overflow: hidden;
+      width: 100%;
+      margin-top: 8px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+    }
+
+    .modal-banner {
+      background: rgba(245,158,11,0.08);
+      border-bottom: 1px solid rgba(245,158,11,0.15);
+      padding: 10px 14px;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .modal-banner-icon { font-size: 14px; margin-top: 1px; flex-shrink: 0; }
+    .modal-banner-title { font-size: 11px; font-weight: 700; color: #fbbf24; text-transform: uppercase; letter-spacing: 0.05em; }
+    .modal-banner-sub { font-size: 10px; color: rgba(251,191,36,0.5); margin-top: 2px; }
+
+    .modal-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+
+    .modal-worked-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #1a1a1a;
+      border: 1px solid #262626;
+      border-radius: 8px;
+      padding: 8px 12px;
+    }
+    .modal-worked-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #444; }
+    .modal-worked-value { font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; color: #e5e5e5; }
+
+    .modal-field { display: flex; flex-direction: column; gap: 4px; }
+    .modal-field label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #444; }
+    .modal-field select, .modal-field textarea {
+      background: #1a1a1a;
+      border: 1px solid #262626;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      color: #e5e5e5;
+      font-family: inherit;
+      outline: none;
+      width: 100%;
+    }
+    .modal-field textarea { resize: none; }
+    .modal-field select:focus, .modal-field textarea:focus { border-color: rgba(251,146,60,0.4); }
+
+    .modal-confirm-body { padding: 16px 14px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+    .modal-confirm-icon { font-size: 28px; }
+    .modal-confirm-title { font-size: 13px; font-weight: 800; color: #f0f0f0; }
+    .modal-confirm-sub { font-size: 11px; color: #555; }
+
+    .btn-red { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
+    .btn-red:hover { background: rgba(239,68,68,0.25); }
   </style>
 </head>
 <body>
@@ -297,6 +370,59 @@
       <p class="action-msg" id="actionMsg"></p>
     </div>
 
+  </div>
+
+  <!-- Early End Modal (< 8 hours) -->
+  <div class="modal-overlay" id="earlyEndModal">
+    <div class="modal">
+      <div class="modal-banner">
+        <span class="modal-banner-icon">⚠️</span>
+        <div>
+          <p class="modal-banner-title">Minimum shift not yet completed</p>
+          <p class="modal-banner-sub">You need to render your 8 hours shift.</p>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="modal-worked-row">
+          <span class="modal-worked-label">Time Worked</span>
+          <span class="modal-worked-value" id="earlyEndWorked">0h 0m</span>
+        </div>
+        <div class="modal-field">
+          <label>Reason <span style="color:#f87171">*</span></label>
+          <select id="earlyEndReason">
+            <option value="">Select a reason…</option>
+            <option value="Emergency">Emergency</option>
+            <option value="Medical / Illness">Medical / Illness</option>
+            <option value="Family Emergency">Family Emergency</option>
+            <option value="Personal Matters">Personal Matters</option>
+            <option value="Work Completed Early">Work Completed Early</option>
+            <option value="Technical Issues">Technical Issues</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="modal-field">
+          <label>Details (optional)</label>
+          <textarea id="earlyEndDetails" rows="2" placeholder="Add more context…"></textarea>
+        </div>
+        <button class="btn btn-red" id="earlyEndSubmitBtn" disabled>Submit &amp; End Shift</button>
+        <button class="btn btn-resume" id="earlyEndCancelBtn">Resume Shift</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Confirm End Modal (≥ 8 hours) -->
+  <div class="modal-overlay" id="confirmEndModal">
+    <div class="modal">
+      <div class="modal-confirm-body">
+        <div class="modal-confirm-icon">🕐</div>
+        <p class="modal-confirm-title">End your shift?</p>
+        <p class="modal-confirm-sub">You have worked <strong id="confirmWorked">0h 0m</strong> today. Are you sure you want to clock out?</p>
+        <div style="width:100%;display:flex;flex-direction:column;gap:6px;margin-top:4px">
+          <button class="btn btn-red" id="confirmEndBtn">End Shift</button>
+          <button class="btn btn-resume" id="confirmCancelBtn">Resume Shift</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -440,12 +566,78 @@
       if (!result.success) showMsg(result.error || 'Failed', true);
     });
 
-    document.getElementById('endShiftBtn').addEventListener('click', async () => {
-      const btn = document.getElementById('endShiftBtn');
+    const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+
+    const getWorkedMs = () => {
+      const prevMs = state.todayTotalActiveMs || 0;
+      const liveMs = state.activityStartMs ? Math.max(0, Date.now() - state.activityStartMs) : 0;
+      return prevMs + liveMs;
+    };
+
+    const fmtWorked = (ms) => {
+      const h = Math.floor(ms / 3600000);
+      const m = Math.floor((ms % 3600000) / 60000);
+      return `${h}h ${m}m`;
+    };
+
+    document.getElementById('endShiftBtn').addEventListener('click', () => {
+      const workedMs = getWorkedMs();
+      if (workedMs < EIGHT_HOURS_MS) {
+        document.getElementById('earlyEndWorked').textContent = fmtWorked(workedMs);
+        document.getElementById('earlyEndReason').value = '';
+        document.getElementById('earlyEndDetails').value = '';
+        document.getElementById('earlyEndSubmitBtn').disabled = true;
+        document.getElementById('earlyEndModal').classList.add('visible');
+      } else {
+        document.getElementById('confirmWorked').textContent = fmtWorked(workedMs);
+        document.getElementById('confirmEndModal').classList.add('visible');
+      }
+    });
+
+    // Early end: enable submit only when reason is selected
+    document.getElementById('earlyEndReason').addEventListener('change', (e) => {
+      document.getElementById('earlyEndSubmitBtn').disabled = !e.target.value;
+    });
+
+    document.getElementById('earlyEndSubmitBtn').addEventListener('click', async () => {
+      const reason = document.getElementById('earlyEndReason').value;
+      if (!reason) return;
+      const details = document.getElementById('earlyEndDetails').value.trim();
+      const note = details ? `${reason} — ${details}` : reason;
+      const btn = document.getElementById('earlyEndSubmitBtn');
       btn.disabled = true;
+      btn.textContent = 'Ending…';
+      const result = await window.trayAPI.timeclockAction('time-out', note);
+      if (!result.success) {
+        btn.disabled = false;
+        btn.textContent = 'Submit & End Shift';
+        showMsg(result.error || 'Failed', true);
+      } else {
+        document.getElementById('earlyEndModal').classList.remove('visible');
+      }
+    });
+
+    document.getElementById('earlyEndCancelBtn').addEventListener('click', () => {
+      document.getElementById('earlyEndModal').classList.remove('visible');
+    });
+
+    // Confirm end
+    document.getElementById('confirmEndBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('confirmEndBtn');
+      btn.disabled = true;
+      btn.textContent = 'Ending…';
       const result = await window.trayAPI.timeclockAction('time-out');
-      btn.disabled = false;
-      if (!result.success) showMsg(result.error || 'Failed', true);
+      if (!result.success) {
+        btn.disabled = false;
+        btn.textContent = 'End Shift';
+        showMsg(result.error || 'Failed', true);
+      } else {
+        document.getElementById('confirmEndModal').classList.remove('visible');
+      }
+    });
+
+    document.getElementById('confirmCancelBtn').addEventListener('click', () => {
+      document.getElementById('confirmEndModal').classList.remove('visible');
     });
 
     document.getElementById('openCrmBtn').addEventListener('click', () => {

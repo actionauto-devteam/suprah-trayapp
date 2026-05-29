@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('trayAPI', {
   // Status
   getStatus: () => ipcRenderer.invoke('status:get'),
   openCRM: () => ipcRenderer.invoke('app:open-crm'),
-  timeclockAction: (type: string) => ipcRenderer.invoke('timeclock:action', type),
+  timeclockAction: (type: string, note?: string) => ipcRenderer.invoke('timeclock:action', type, note),
 
   // Events from main → renderer
   onStatusUpdate: (cb: (data: unknown) => void) =>

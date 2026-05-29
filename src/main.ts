@@ -29,7 +29,7 @@ dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat } from './heartbeat';
-import { startScreenshots, stopScreenshots } from './screenshot';
+import { startScreenshots, stopScreenshots, captureAndUploadOnce } from './screenshot';
 import { flushQueue } from './offline-queue';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -601,11 +601,15 @@ ipcMain.handle('status:get', () => agentState);
 
 ipcMain.handle('app:open-crm', () => shell.openExternal(CRM_URL));
 
-ipcMain.handle('timeclock:action', async (_e, type: string) => {
+ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
   const token = store.get('crm_token') as string | undefined;
   if (!token) return { success: false, error: 'Not authenticated' };
   try {
-    await axios.post(`${API_URL}/api/crm/time-clock`, { type }, {
+    // Capture a screenshot before ending shift as proof of the final screen state
+    if (type === 'time-out') {
+      captureAndUploadOnce(API_URL, token).catch(() => {});
+    }
+    await axios.post(`${API_URL}/api/crm/time-clock`, { type, ...(note && { note }) }, {
       headers: { Authorization: `Bearer ${token}` },
       timeout: 15_000,
     });
