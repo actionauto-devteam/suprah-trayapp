@@ -364,6 +364,10 @@ const startAgentServices = async (token: string) => {
       stopScreenshots();
       agentState.nextScreenshotIn = null;
 
+      // Immediately tell the server the interval has stopped (currentIntervalStartAt=null)
+      // so the CRM timer freezes in lock-step instead of lagging until the next 60s heartbeat.
+      if (wasTracking) pingHeartbeat();
+
       if (wasTracking && Notification.isSupported()) {
         new Notification({
           title: 'You are idle',
@@ -414,6 +418,11 @@ const startAgentServices = async (token: string) => {
     const breakDurationSeconds = isOnBreak && agentState.breakStartedAt
       ? Math.floor((Date.now() - new Date(agentState.breakStartedAt).getTime()) / 1000)
       : 0;
+    // Report activityStartMs (this machine's clock). The CRM browser runs on the
+    // same machine, so it computes (Date.now() - activityStartMs) in the SAME clock
+    // domain → both timers match exactly. Reporting a server timestamp here would
+    // mix the machine clock (CRM's Date.now()) with the server clock and surface
+    // any clock skew as visible drift between the two displays.
     const currentIntervalStartAt = activityStartMs ? new Date(activityStartMs).toISOString() : null;
     return { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt };
   });
