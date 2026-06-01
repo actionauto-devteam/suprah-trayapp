@@ -122,8 +122,10 @@ const broadcastState = () => {
    Tray icon helpers
 ───────────────────────────────────────────────────────────────── */
 const getTrayIcon = () => {
+  // Use activityStartMs as fallback — same logic as status.html's effectivelyOnShift
+  const effectivelyOnShift = agentState.isOnShift || activityStartMs !== null;
   const iconName = agentState.isAgentOnline
-    ? agentState.isOnShift
+    ? effectivelyOnShift
       ? agentState.isIdle ? 'tray-idle.png' : 'tray-active.png'
       : 'tray-offline.png'
     : 'tray-offline.png';
@@ -140,8 +142,9 @@ const updateTrayIcon = () => {
   if (!tray) return;
   tray.setImage(getTrayIcon());
 
+  const effectivelyOnShift = agentState.isOnShift || activityStartMs !== null;
   const tooltip = agentState.isAuthenticated
-    ? agentState.isOnShift
+    ? effectivelyOnShift
       ? agentState.isIdle
         ? `Action Auto — Idle (${agentState.user?.fullName})`
         : `Action Auto — On Shift (${agentState.user?.fullName})`
@@ -157,9 +160,10 @@ const buildTrayMenu = () => {
   const items: Electron.MenuItemConstructorOptions[] = [];
 
   if (agentState.isAuthenticated && agentState.user) {
+    const effectivelyOnShift = agentState.isOnShift || activityStartMs !== null;
     items.push({ label: agentState.user.fullName, enabled: false });
     items.push({
-      label: agentState.isOnShift
+      label: effectivelyOnShift
         ? agentState.isIdle ? '⚪ Idle' : '🟢 On Shift'
         : agentState.isOnBreak ? '☕ On Break' : '⚫ Not Clocked In',
       enabled: false,
