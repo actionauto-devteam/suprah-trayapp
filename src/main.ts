@@ -357,6 +357,9 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
           activityStartMs = Date.now();
         }
         agentState.activityStartMs = activityStartMs;
+        // Also restart screenshots — they may have been stopped by a prior break
+        // or desync and the break-out socket event may have been missed.
+        startScreenshots(API_URL, token);
       } else {
         agentState.activityStartMs = activityStartMs;
       }
@@ -714,6 +717,7 @@ ipcMain.handle('remember:set', (_e, username: string | null) => {
 ipcMain.handle('status:get', () => agentState);
 
 ipcMain.handle('app:open-crm', () => shell.openExternal(CRM_URL));
+ipcMain.handle('app:get-version', () => app.getVersion());
 
 ipcMain.handle('shift:check-resumable', async () => {
   const token = store.get('crm_token') as string | undefined;

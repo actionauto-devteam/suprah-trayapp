@@ -249,6 +249,14 @@
       min-height: 13px;
     }
 
+    .version-label {
+      font-size: 9px;
+      text-align: center;
+      color: #222;
+      letter-spacing: 0.05em;
+      margin-top: 1px;
+    }
+
     /* Modals */
     .modal-overlay {
       display: none;
@@ -368,6 +376,7 @@
         <button class="btn btn-danger" id="signOutBtn">Sign Out</button>
       </div>
       <p class="action-msg" id="actionMsg"></p>
+      <p class="version-label" id="appVersion"></p>
     </div>
 
   </div>
@@ -712,6 +721,9 @@
     // ── State sync ───────────────────────────────────────────────────
     window.trayAPI.onStatusUpdate((data) => applyState(data));
     window.trayAPI.getStatus().then(applyState);
+    window.trayAPI.getAppVersion().then(v => {
+      document.getElementById('appVersion').textContent = `v${v}`;
+    });
   </script>
 </body>
 </html>
