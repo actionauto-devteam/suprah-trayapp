@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('trayAPI', {
   getStatus: () => ipcRenderer.invoke('status:get'),
   openCRM: () => ipcRenderer.invoke('app:open-crm'),
   timeclockAction: (type: string, note?: string) => ipcRenderer.invoke('timeclock:action', type, note),
+  checkResumableShift: () => ipcRenderer.invoke('shift:check-resumable'),
 
   // Events from main → renderer
   onStatusUpdate: (cb: (data: unknown) => void) =>

@@ -7,10 +7,17 @@ import { getIsIdle } from './idle';
 import { enqueue, flushQueue } from './offline-queue';
 
 const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const CAPTURE_FAIL_COOLDOWN_MS = 30 * 60 * 1000; // notify at most once per 30 min
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let apiUrl = '';
 let token = '';
+let captureFailedCb: (() => void) | null = null;
+let lastCaptureFailedAt = 0;
+
+export function setCaptureFailedCallback(cb: () => void): void {
+  captureFailedCb = cb;
+}
 
 // Use MDT (UTC-6) so shiftDate matches the backend's COMPANY_TZ_OFFSET_MINUTES = -360
 const MDT_OFFSET_MS = -6 * 60 * 60 * 1000;
@@ -104,6 +111,13 @@ async function captureAndUpload(): Promise<void> {
     }
   } catch (err) {
     console.error('[screenshot] Capture failed:', err);
+    // Notify the user (throttled) — upload failures are handled by the offline queue
+    // and are not errors worth notifying. Only actual capture errors reach here.
+    const now = Date.now();
+    if (captureFailedCb && now - lastCaptureFailedAt > CAPTURE_FAIL_COOLDOWN_MS) {
+      lastCaptureFailedAt = now;
+      captureFailedCb();
+    }
   }
 }
 

@@ -410,6 +410,25 @@
     </div>
   </div>
 
+  <!-- Resume Shift Modal -->
+  <div class="modal-overlay" id="resumeModal">
+    <div class="modal">
+      <div class="modal-confirm-body">
+        <div class="modal-confirm-icon">🕐</div>
+        <p class="modal-confirm-title">Resume Your Shift?</p>
+        <p class="modal-confirm-sub">
+          You have an unfinished shift from today that started at
+          <strong id="resumeOriginalTime">—</strong>.
+          Would you like to continue from where you left off?
+        </p>
+        <div style="width:100%;display:flex;flex-direction:column;gap:6px;margin-top:4px">
+          <button class="btn btn-resume" id="resumeYesBtn">Yes, Resume Shift</button>
+          <button class="btn btn-ghost" id="resumeNoBtn">No, Start New Shift</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Confirm End Modal (≥ 8 hours) -->
   <div class="modal-overlay" id="confirmEndModal">
     <div class="modal">
@@ -429,6 +448,14 @@
     let state = {};
     let timerInterval = null;
     let breakInterval = null;
+
+    const fmtMDT = (iso) => {
+      if (!iso) return '—';
+      const MDT = -6 * 60 * 60 * 1000;
+      return new Date(new Date(iso).getTime() + MDT).toLocaleTimeString('en-US', {
+        hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC',
+      });
+    };
 
     const fmt = (totalSec) => {
       const s = Math.max(0, Math.floor(totalSec));
@@ -484,6 +511,11 @@
       clearInterval(breakInterval);
       document.getElementById('breakRow').style.display = 'none';
 
+      // Use activityStartMs as authoritative fallback: if the timer is still
+      // counting, the shift must be active even if isOnShift is momentarily
+      // wrong due to a stale socket event or brief sync desync.
+      const effectivelyOnShift = s.isOnShift || s.activityStartMs !== null;
+
       if (s.isOnBreak) {
         pill.className = 'status-pill on-break';
         statusDot.className = 'status-dot pulse';
@@ -491,11 +523,11 @@
         document.getElementById('breakRow').style.display = 'flex';
         updateBreakDisplay();
         breakInterval = setInterval(updateBreakDisplay, 1000);
-      } else if (s.isOnShift && s.isIdle) {
+      } else if (effectivelyOnShift && s.isIdle) {
         pill.className = 'status-pill idle';
         statusDot.className = 'status-dot';
         statusText.textContent = 'Idle — Paused';
-      } else if (s.isOnShift) {
+      } else if (effectivelyOnShift) {
         pill.className = 'status-pill on-shift';
         statusDot.className = 'status-dot pulse';
         statusText.textContent = 'On Shift';
@@ -532,7 +564,10 @@
         shiftActions.style.display  = 'none';
         return;
       }
-      if (!s.isOnShift) {
+      // Mirror effectivelyOnShift from applyState — activityStartMs is the
+      // authoritative fallback when isOnShift is temporarily out of sync.
+      const effectivelyOnShift = s.isOnShift || s.activityStartMs !== null;
+      if (!effectivelyOnShift) {
         startShiftBtn.style.display = '';
         shiftActions.style.display  = 'none';
       } else {
@@ -549,12 +584,38 @@
     };
 
     // ── Timeclock button handlers ────────────────────────────────────
-    document.getElementById('startShiftBtn').addEventListener('click', async () => {
+    const doTimeIn = async () => {
       const btn = document.getElementById('startShiftBtn');
       btn.disabled = true;
       const result = await window.trayAPI.timeclockAction('time-in');
       btn.disabled = false;
       if (!result.success) showMsg(result.error || 'Failed', true);
+    };
+
+    document.getElementById('startShiftBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('startShiftBtn');
+      btn.disabled = true;
+      try {
+        const resumable = await window.trayAPI.checkResumableShift();
+        if (resumable?.resumable && resumable?.originalClockIn) {
+          document.getElementById('resumeOriginalTime').textContent = fmtMDT(resumable.originalClockIn);
+          document.getElementById('resumeModal').classList.add('visible');
+          btn.disabled = false;
+          return;
+        }
+      } catch {}
+      btn.disabled = false;
+      doTimeIn();
+    });
+
+    document.getElementById('resumeYesBtn').addEventListener('click', () => {
+      document.getElementById('resumeModal').classList.remove('visible');
+      doTimeIn();
+    });
+
+    document.getElementById('resumeNoBtn').addEventListener('click', () => {
+      document.getElementById('resumeModal').classList.remove('visible');
+      doTimeIn();
     });
 
     document.getElementById('breakBtn').addEventListener('click', async () => {

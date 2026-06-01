@@ -29,7 +29,7 @@ dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat } from './heartbeat';
-import { startScreenshots, stopScreenshots, captureAndUploadOnce } from './screenshot';
+import { startScreenshots, stopScreenshots, captureAndUploadOnce, setCaptureFailedCallback } from './screenshot';
 import { flushQueue } from './offline-queue';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -304,7 +304,59 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       // The live interval start is managed locally and reset fresh on each app session.
       todayTotalActiveMs = (s.todayTotalActiveSeconds ?? 0) * 1000;
       agentState.todayTotalActiveMs = todayTotalActiveMs;
-      agentState.activityStartMs = activityStartMs; // keep whatever is already set locally
+
+      // Reconcile activity tracking — only handle the CONFIRMED BREAK case.
+      //
+      // IMPORTANT: Do NOT clear activityStartMs based on isOnShift being false.
+      // isOnShift can be temporarily wrong during socket desyncs, and clearing
+      // activityStartMs corrupts currentIntervalStartAt via the next heartbeat,
+      // which cascades to reset the CRM dashboard timer too.
+      // Socket event handlers (break-in, time-out) already handle the correct
+      // transitions in real time — syncShiftState only patches missed break-in.
+      const isNowTracking = effectivelyOnShift && !agentState.isOnBreak && !agentState.isIdle;
+
+      if (effectivelyOnShift && agentState.isOnBreak && activityStartMs !== null) {
+        // CONFIRMED on break but local interval is still running → missed break-in event.
+        // Flush the interval up to when the break started so work time is preserved.
+        const stopAt = agentState.breakStartedAt
+          ? new Date(agentState.breakStartedAt).getTime()
+          : Date.now();
+        const durationMs = Math.max(0, stopAt - activityStartMs);
+        const tkn = store.get('crm_token') as string | undefined;
+        if (tkn && durationMs >= 30_000) {
+          axios.post(
+            `${API_URL}/api/crm/timeproof/activity-interval`,
+            { startAt: new Date(activityStartMs).toISOString(), endAt: new Date(stopAt).toISOString() },
+            { headers: { Authorization: `Bearer ${tkn}` }, timeout: 10_000 }
+          ).then(() => {
+            todayTotalActiveMs += durationMs;
+            agentState.todayTotalActiveMs = todayTotalActiveMs;
+            broadcastState();
+          }).catch(() => {});
+        }
+        activityStartMs = null;
+        agentState.activityStartMs = null;
+        stopScreenshots();
+        agentState.nextScreenshotIn = null;
+      } else if (isNowTracking && activityStartMs === null) {
+        // Active but no local interval (tray restarted, or missed break-out event).
+        // Restore from server's currentIntervalStartAt so the timer continues from
+        // where it left off instead of resetting to 0. Falls back to Date.now() if
+        // the server value is missing or older than the shift start (stale/invalid).
+        const shiftStart = agentState.shiftStartedAt
+          ? new Date(agentState.shiftStartedAt).getTime() : 0;
+        const serverIntervalStart = s.currentIntervalStartAt
+          ? new Date(s.currentIntervalStartAt).getTime() : null;
+        if (serverIntervalStart && serverIntervalStart >= shiftStart && serverIntervalStart <= Date.now()) {
+          activityStartMs = serverIntervalStart;
+        } else {
+          activityStartMs = Date.now();
+        }
+        agentState.activityStartMs = activityStartMs;
+      } else {
+        agentState.activityStartMs = activityStartMs;
+      }
+
       broadcastState();
       return;
     } catch {
@@ -323,6 +375,17 @@ let tokenRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
 const startAgentServices = async (token: string) => {
   const SCREENSHOT_INTERVAL_MS = 10 * 60 * 1000;
   const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 60 * 1000; // 10 hours — renew before 12h expiry
+
+  // Notify the user when screen capture itself fails (upload failures are queued offline)
+  setCaptureFailedCallback(() => {
+    if (Notification.isSupported()) {
+      new Notification({
+        title: 'Screenshot capture failed',
+        body: 'TimeProof could not capture your screen. Please check your screen recording permissions. Your admin may see a gap in your activity.',
+        silent: false,
+      }).show();
+    }
+  });
 
   // Proactively renew token every 10 hours so the tray never goes stale
   tokenRefreshIntervalId = setInterval(async () => {
@@ -581,6 +644,44 @@ const handleLogout = async () => {
 };
 
 /* ─────────────────────────────────────────────────────────────────
+   Supra Space helper — early-end shift notification
+───────────────────────────────────────────────────────────────── */
+const notifyEarlyEndToSupraSpace = (token: string, note: string): void => {
+  const userName = agentState.user?.fullName || 'An employee';
+  // note format: "Reason" or "Reason — Details"
+  const dashIdx = note.indexOf(' — ');
+  const reason  = dashIdx >= 0 ? note.slice(0, dashIdx) : note;
+  const details = dashIdx >= 0 ? note.slice(dashIdx + 3) : '';
+
+  // Capture worked time before state resets
+  const workedMs = todayTotalActiveMs + (activityStartMs ? Date.now() - activityStartMs : 0);
+  const h = Math.floor(workedMs / 3_600_000);
+  const m = Math.floor((workedMs % 3_600_000) / 60_000);
+
+  const parts = [
+    `⚡ Early Shift End — ${userName}`,
+    `Reason: ${reason}`,
+    `Time worked: ${h}h ${m}m`,
+  ];
+  if (details) parts.push(`Details: ${details}`);
+  const content = parts.join('\n');
+
+  axios.get(`${API_URL}/api/supraspace/conversations`, {
+    headers: { Authorization: `Bearer ${token}` },
+    timeout: 10_000,
+  }).then(({ data }) => {
+    const convs: Array<{ _id: string; type: string; name?: string }> = data?.data || [];
+    const general = convs.find((c) => c.type === 'group' && c.name?.toLowerCase() === 'general');
+    if (!general) return;
+    return axios.post(
+      `${API_URL}/api/supraspace/conversations/${general._id}/messages`,
+      { content },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 }
+    );
+  }).catch(() => {}); // silently ignore — shift already ended
+};
+
+/* ─────────────────────────────────────────────────────────────────
    IPC handlers
 ───────────────────────────────────────────────────────────────── */
 ipcMain.handle('auth:login', async (_e, { username, password }: { username: string; password: string }) => {
@@ -610,6 +711,20 @@ ipcMain.handle('status:get', () => agentState);
 
 ipcMain.handle('app:open-crm', () => shell.openExternal(CRM_URL));
 
+ipcMain.handle('shift:check-resumable', async () => {
+  const token = store.get('crm_token') as string | undefined;
+  if (!token) return { resumable: false };
+  try {
+    const { data } = await axios.get(`${API_URL}/api/crm/timeproof/resumable-shift`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 10_000,
+    });
+    return data?.data ?? { resumable: false };
+  } catch {
+    return { resumable: false };
+  }
+});
+
 ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
   const token = store.get('crm_token') as string | undefined;
   if (!token) return { success: false, error: 'Not authenticated' };
@@ -622,6 +737,10 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
       headers: { Authorization: `Bearer ${token}` },
       timeout: 15_000,
     });
+    // Notify General channel on early end (note is only set when reason is provided)
+    if (type === 'time-out' && note) {
+      notifyEarlyEndToSupraSpace(token, note);
+    }
     // Sync in background, then ensure tracking state is correct.
     // The socket event and syncShiftState can race — if syncShiftState wins and
     // updates isOnShift before the socket event fires, the socket handler sees
