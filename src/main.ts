@@ -292,15 +292,26 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       });
       const s = data?.data;
       if (!s) return;
-      // If the backend says the user is on shift but that shift started on a previous
-      // day (isShiftFromToday=false), treat them as off-shift in the tray. Opening the
-      // app should NOT auto-start the timer for a forgotten clock-out from days ago.
-      const effectivelyOnShift = s.isOnShift && (s.isShiftFromToday !== false);
-      agentState.isOnShift              = effectivelyOnShift;
-      agentState.isOnBreak              = effectivelyOnShift ? s.isOnBreak : false;
-      agentState.shiftStartedAt         = effectivelyOnShift ? (s.shiftStartedAt ?? null) : null;
-      agentState.breakStartedAt         = effectivelyOnShift ? (s.breakStartedAt ?? null) : null;
-      agentState.totalBreakSeconds      = effectivelyOnShift ? (s.totalBreakSeconds ?? 0) : 0;
+      // Trust the backend's isOnShift for display so the tray UI matches the CRM and
+      // does not desync when a shift crosses MDT midnight or runs slightly long. The
+      // original "isShiftFromToday" guard incorrectly hid legitimate ongoing shifts
+      // that started yesterday MDT, causing "already clocked in" errors when the user
+      // tried to click Start Shift again on a tray that wrongly showed "Off Shift".
+      //
+      // For genuine forgotten clock-outs (shift older than ~16 hours), we still avoid
+      // auto-starting activity tracking — but the user sees the on-shift state and
+      // can press End Shift to close it cleanly.
+      const STALE_SHIFT_MS = 16 * 60 * 60 * 1000;
+      const elapsedMs = s.shiftStartedAt
+        ? Date.now() - new Date(s.shiftStartedAt).getTime()
+        : 0;
+      const isStaleShift = !!s.isOnShift && elapsedMs > STALE_SHIFT_MS;
+
+      agentState.isOnShift              = !!s.isOnShift;
+      agentState.isOnBreak              = s.isOnShift ? !!s.isOnBreak : false;
+      agentState.shiftStartedAt         = s.isOnShift ? (s.shiftStartedAt ?? null) : null;
+      agentState.breakStartedAt         = s.isOnShift ? (s.breakStartedAt ?? null) : null;
+      agentState.totalBreakSeconds      = s.isOnShift ? (s.totalBreakSeconds ?? 0) : 0;
       agentState.todayTotalWorkedSeconds = s.todayTotalWorkedSeconds ?? 0;
       // Activity-based tracking: pull the authoritative completed-interval total from the server.
       // We do NOT restore activityStartMs from currentIntervalStartAt because that value could
@@ -309,17 +320,15 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       todayTotalActiveMs = (s.todayTotalActiveSeconds ?? 0) * 1000;
       agentState.todayTotalActiveMs = todayTotalActiveMs;
 
-      // Reconcile activity tracking — only handle the CONFIRMED BREAK case.
-      //
-      // IMPORTANT: Do NOT clear activityStartMs based on isOnShift being false.
-      // isOnShift can be temporarily wrong during socket desyncs, and clearing
-      // activityStartMs corrupts currentIntervalStartAt via the next heartbeat,
-      // which cascades to reset the CRM dashboard timer too.
-      // Socket event handlers (break-in, time-out) already handle the correct
-      // transitions in real time — syncShiftState only patches missed break-in.
-      const isNowTracking = effectivelyOnShift && !agentState.isOnBreak && !agentState.isIdle;
+      // Reconcile activity tracking with authoritative server state.
+      // Socket event handlers handle real-time transitions; syncShiftState
+      // patches missed socket events (missed break-in, missed time-out).
+      // For stale shifts (forgotten clock-outs > 16h) we still surface on-shift
+      // status in the UI but skip auto-starting the activity counter — the user
+      // must explicitly end the old shift to start a fresh one.
+      const isNowTracking = agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle && !isStaleShift;
 
-      if (effectivelyOnShift && agentState.isOnBreak && activityStartMs !== null) {
+      if (agentState.isOnShift && agentState.isOnBreak && activityStartMs !== null) {
         // CONFIRMED on break but local interval is still running → missed break-in event.
         // Flush the interval up to when the break started so work time is preserved.
         const stopAt = agentState.breakStartedAt
@@ -338,6 +347,14 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
             broadcastState();
           }).catch(() => {});
         }
+        activityStartMs = null;
+        agentState.activityStartMs = null;
+        stopScreenshots();
+        agentState.nextScreenshotIn = null;
+      } else if (!agentState.isOnShift && activityStartMs !== null) {
+        // Server confirms off-shift (clocked out) but local timer is still running.
+        // This happens when the time-out socket event was missed.
+        // The socket handler already committed the interval — just clear the local state.
         activityStartMs = null;
         agentState.activityStartMs = null;
         stopScreenshots();

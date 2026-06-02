@@ -195,7 +195,7 @@
     .footer {
       text-align: center;
       font-size: 10px;
-      color: #333;
+      color: #e5e5e5;
       padding: 12px 0 16px;
       flex-shrink: 0;
     }
@@ -245,10 +245,17 @@
     </form>
   </div>
 
-  <div class="footer">Action Auto CRM — TimeProof Agent v1.0.0</div>
+  <div class="footer">Action Auto CRM — TimeProof Agent <span id="versionText">v—</span></div>
 
   <script>
     document.getElementById('closeBtn').addEventListener('click', () => window.close());
+
+    // Display the installed app version dynamically so the footer always
+    // matches the actual build — no need to manually update it on each release.
+    window.trayAPI.getAppVersion().then((v) => {
+      const el = document.getElementById('versionText');
+      if (el && v) el.textContent = `v${v}`;
+    }).catch(() => {});
 
     const form = document.getElementById('loginForm');
     const errorMsg = document.getElementById('errorMsg');
