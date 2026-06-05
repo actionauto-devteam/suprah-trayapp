@@ -360,23 +360,34 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (isNowTracking && activityStartMs === null) {
-        // Active but no local interval (tray restarted, or missed break-out event).
-        // Restore from server's currentIntervalStartAt so the timer continues from
-        // where it left off instead of resetting to 0. Falls back to Date.now() if
-        // the server value is missing or older than the shift start (stale/invalid).
-        const shiftStart = agentState.shiftStartedAt
+        // Active but no local interval. Only auto-resume when the shift was started
+        // very recently (within the last 5 minutes) — that covers the legitimate
+        // "user just clicked Start Shift in the CRM, then opens the tray" handoff.
+        //
+        // For older unclosed clock-ins (e.g. a forgotten clock-out from earlier
+        // today or yesterday), DO NOT auto-start the activity counter. The tray
+        // still reflects the on-shift status from the backend so the user can see
+        // the stale shift, but the timer stays paused until the user explicitly
+        // clicks Start Shift (which we treat as "Resume" if backend says they're
+        // already clocked in — see timeclock:action handler below).
+        const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
+        const shiftStartedAtMs = agentState.shiftStartedAt
           ? new Date(agentState.shiftStartedAt).getTime() : 0;
-        const serverIntervalStart = s.currentIntervalStartAt
-          ? new Date(s.currentIntervalStartAt).getTime() : null;
-        if (serverIntervalStart && serverIntervalStart >= shiftStart && serverIntervalStart <= Date.now()) {
-          activityStartMs = serverIntervalStart;
-        } else {
-          activityStartMs = Date.now();
+        const shiftStartedRecently = shiftStartedAtMs > 0
+          && (Date.now() - shiftStartedAtMs) < SHIFT_AUTO_RESUME_MS;
+
+        if (shiftStartedRecently) {
+          const serverIntervalStart = s.currentIntervalStartAt
+            ? new Date(s.currentIntervalStartAt).getTime() : null;
+          if (serverIntervalStart && serverIntervalStart >= shiftStartedAtMs && serverIntervalStart <= Date.now()) {
+            activityStartMs = serverIntervalStart;
+          } else {
+            activityStartMs = Date.now();
+          }
+          agentState.activityStartMs = activityStartMs;
+          startScreenshots(API_URL, token);
         }
-        agentState.activityStartMs = activityStartMs;
-        // Also restart screenshots — they may have been stopped by a prior break
-        // or desync and the break-out socket event may have been missed.
-        startScreenshots(API_URL, token);
+        // else: leave activityStartMs = null. User must explicitly click Start Shift.
       } else {
         agentState.activityStartMs = activityStartMs;
       }
@@ -559,12 +570,22 @@ const startAgentServices = async (token: string) => {
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (!wasTracking && isNowTracking) {
-        // Clocked in or resumed from break (not idle) — start a new active interval
-        activityStartMs = Date.now();
-        agentState.activityStartMs = activityStartMs;
-        const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
-        agentState.nextScreenshotIn = new Date(nextIn).toISOString();
-        startScreenshots(API_URL, token);
+        // Clocked in or resumed from break (not idle) — start a new active interval.
+        // Gate to "very recent" shift to avoid the socket reconnect race where an
+        // initial-state emission for an older open shift would auto-resume tracking
+        // without the user explicitly clicking Start/Resume in the tray.
+        const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
+        const shiftStartedAtMs = agentState.shiftStartedAt
+          ? new Date(agentState.shiftStartedAt).getTime() : 0;
+        const shiftStartedRecently = shiftStartedAtMs > 0
+          && (Date.now() - shiftStartedAtMs) < SHIFT_AUTO_RESUME_MS;
+        if (shiftStartedRecently) {
+          activityStartMs = Date.now();
+          agentState.activityStartMs = activityStartMs;
+          const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
+          agentState.nextScreenshotIn = new Date(nextIn).toISOString();
+          startScreenshots(API_URL, token);
+        }
       }
 
       // Ping AFTER activityStartMs is set/cleared so the DB gets the correct
@@ -579,14 +600,14 @@ const startAgentServices = async (token: string) => {
     () => { syncShiftState(token); },
   );
 
-  // Sync state, then start activity tracking only if clocked in and not idle/break
+  // Sync state. syncShiftState already handles auto-resume tracking (gated to
+  // shifts started within the last 5 minutes) — DO NOT add an unconditional
+  // auto-start here. An older open shift (e.g. forgotten clock-out from earlier
+  // today) shows up as "Shift Open — Tap Resume" in the tray UI; the user
+  // explicitly clicks Resume to opt back into tracking.
   await syncShiftState(token);
-  if (agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle) {
-    if (activityStartMs === null) {
-      activityStartMs = Date.now();
-      agentState.activityStartMs = activityStartMs;
-    }
-    startScreenshots(API_URL, token);
+  if (activityStartMs !== null) {
+    // syncShiftState set activityStartMs (recent shift) — propagate to the server
     pingHeartbeat();
   }
 
@@ -668,44 +689,6 @@ const handleLogout = async () => {
 };
 
 /* ─────────────────────────────────────────────────────────────────
-   Supra Space helper — early-end shift notification
-───────────────────────────────────────────────────────────────── */
-const notifyEarlyEndToSupraSpace = (token: string, note: string): void => {
-  const userName = agentState.user?.fullName || 'An employee';
-  // note format: "Reason" or "Reason — Details"
-  const dashIdx = note.indexOf(' — ');
-  const reason  = dashIdx >= 0 ? note.slice(0, dashIdx) : note;
-  const details = dashIdx >= 0 ? note.slice(dashIdx + 3) : '';
-
-  // Capture worked time before state resets
-  const workedMs = todayTotalActiveMs + (activityStartMs ? Date.now() - activityStartMs : 0);
-  const h = Math.floor(workedMs / 3_600_000);
-  const m = Math.floor((workedMs % 3_600_000) / 60_000);
-
-  const parts = [
-    `⚡ Early Shift End — ${userName}`,
-    `Reason: ${reason}`,
-    `Time worked: ${h}h ${m}m`,
-  ];
-  if (details) parts.push(`Details: ${details}`);
-  const content = parts.join('\n');
-
-  axios.get(`${API_URL}/api/supraspace/conversations`, {
-    headers: { Authorization: `Bearer ${token}` },
-    timeout: 10_000,
-  }).then(({ data }) => {
-    const convs: Array<{ _id: string; type: string; name?: string }> = data?.data || [];
-    const general = convs.find((c) => c.type === 'group' && c.name?.toLowerCase() === 'general');
-    if (!general) return;
-    return axios.post(
-      `${API_URL}/api/supraspace/conversations/${general._id}/messages`,
-      { content },
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 }
-    );
-  }).catch(() => {}); // silently ignore — shift already ended
-};
-
-/* ─────────────────────────────────────────────────────────────────
    IPC handlers
 ───────────────────────────────────────────────────────────────── */
 ipcMain.handle('auth:login', async (_e, { username, password }: { username: string; password: string }) => {
@@ -762,10 +745,6 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
       headers: { Authorization: `Bearer ${token}` },
       timeout: 15_000,
     });
-    // Notify General channel on early end (note is only set when reason is provided)
-    if (type === 'time-out' && note) {
-      notifyEarlyEndToSupraSpace(token, note);
-    }
     // Sync in background, then ensure tracking state is correct.
     // The socket event and syncShiftState can race — if syncShiftState wins and
     // updates isOnShift before the socket event fires, the socket handler sees
@@ -783,6 +762,26 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
     return { success: true };
   } catch (err: any) {
     const msg = err?.response?.data?.message || 'Action failed';
+
+    // Resume path: backend already has an open clock-in (carried over from a
+    // forgotten or older session). The tray no longer auto-tracks on launch for
+    // older shifts, so the user has to click Start Shift again to opt in. Treat
+    // that click as "resume tracking on the existing shift" rather than an error.
+    if (type === 'time-in' && /already clocked in/i.test(msg)) {
+      try {
+        await syncShiftState(token);
+        if (agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle && activityStartMs === null) {
+          activityStartMs = Date.now();
+          agentState.activityStartMs = activityStartMs;
+          startScreenshots(API_URL, token);
+          pingHeartbeat();
+          broadcastState();
+        }
+        return { success: true };
+      } catch {
+        return { success: false, error: msg };
+      }
+    }
     return { success: false, error: msg };
   }
 });

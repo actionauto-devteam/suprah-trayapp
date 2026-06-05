@@ -520,10 +520,13 @@
       clearInterval(breakInterval);
       document.getElementById('breakRow').style.display = 'none';
 
-      // Use activityStartMs as authoritative fallback: if the timer is still
-      // counting, the shift must be active even if isOnShift is momentarily
-      // wrong due to a stale socket event or brief sync desync.
-      const effectivelyOnShift = s.isOnShift || s.activityStartMs !== null;
+      // Three distinct states the tray can be in:
+      //  • Actively tracking (activityStartMs !== null) — timer is ticking
+      //  • Shift open on backend but tray not tracking locally (e.g. fresh login
+      //    on a forgotten-clock-out shift) — show "Shift Open" with Resume button
+      //  • Truly off shift — show "Not Clocked In" / "Shift Complete"
+      const isLocallyTracking = s.activityStartMs !== null;
+      const isShiftOpenNoTracking = !!s.isOnShift && !isLocallyTracking;
 
       if (s.isOnBreak) {
         pill.className = 'status-pill on-break';
@@ -532,14 +535,21 @@
         document.getElementById('breakRow').style.display = 'flex';
         updateBreakDisplay();
         breakInterval = setInterval(updateBreakDisplay, 1000);
-      } else if (effectivelyOnShift && s.isIdle) {
+      } else if (isLocallyTracking && s.isIdle) {
         pill.className = 'status-pill idle';
         statusDot.className = 'status-dot';
         statusText.textContent = 'Idle — Paused';
-      } else if (effectivelyOnShift) {
+      } else if (isLocallyTracking) {
         pill.className = 'status-pill on-shift';
         statusDot.className = 'status-dot pulse';
         statusText.textContent = 'On Shift';
+      } else if (isShiftOpenNoTracking) {
+        // Backend has an open clock-in but the tray isn't actively tracking yet.
+        // The user must click Start/Resume to opt in — the work timer stays
+        // paused and shows only previously-saved active time, not a live tick.
+        pill.className = 'status-pill idle';
+        statusDot.className = 'status-dot';
+        statusText.textContent = 'Shift Open — Tap Resume';
       } else if ((s.todayTotalActiveMs || 0) > 0) {
         pill.className = 'status-pill offline';
         statusDot.className = 'status-dot';
@@ -573,22 +583,26 @@
         shiftActions.style.display  = 'none';
         return;
       }
-      // Mirror effectivelyOnShift from applyState — activityStartMs is the
-      // authoritative fallback when isOnShift is temporarily out of sync.
-      const effectivelyOnShift = s.isOnShift || s.activityStartMs !== null;
-      if (!effectivelyOnShift) {
-        startShiftBtn.style.display = '';
-        shiftActions.style.display  = 'none';
-      } else {
+      const isLocallyTracking = s.activityStartMs !== null;
+      const isShiftOpenNoTracking = !!s.isOnShift && !isLocallyTracking && !s.isOnBreak;
+
+      if (s.isOnBreak) {
+        // On break: show "Resume" (to end break) + End Shift. Hide Start/Resume Shift.
         startShiftBtn.style.display = 'none';
         shiftActions.style.display  = 'flex';
-        if (s.isOnBreak) {
-          breakBtn.textContent = 'Resume';
-          breakBtn.className   = 'btn btn-resume';
-        } else {
-          breakBtn.textContent = 'Break';
-          breakBtn.className   = 'btn btn-break';
-        }
+        breakBtn.textContent = 'Resume';
+        breakBtn.className   = 'btn btn-resume';
+      } else if (!isLocallyTracking) {
+        // Not tracking and not on break: show Start Shift / Resume Shift button.
+        startShiftBtn.style.display = '';
+        shiftActions.style.display  = 'none';
+        startShiftBtn.textContent = isShiftOpenNoTracking ? 'Resume Shift' : 'Start Shift';
+      } else {
+        // Actively tracking: show Break + End Shift.
+        startShiftBtn.style.display = 'none';
+        shiftActions.style.display  = 'flex';
+        breakBtn.textContent = 'Break';
+        breakBtn.className   = 'btn btn-break';
       }
     };
 
