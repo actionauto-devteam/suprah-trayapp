@@ -25,4 +25,13 @@ contextBridge.exposeInMainWorld('trayAPI', {
 
   // Remove listeners on cleanup
   removeAllListeners: (channel: string) => ipcRenderer.removeAllListeners(channel),
+
+  // Recording
+  startRecording: () => ipcRenderer.invoke('recording:start-request'),
+  stopRecording: () => ipcRenderer.invoke('recording:stop-request'),
+  onRecordingState: (cb: (state: string) => void) =>
+    ipcRenderer.on('recording:state', (_e, state: string) => cb(state)),
+
+  // Autrix AI panel
+  openAutrix: () => ipcRenderer.invoke('autrix:open'),
 });

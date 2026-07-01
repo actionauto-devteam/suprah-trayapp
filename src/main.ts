@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor } from 'electron';
 app.setName('Action Auto CRM Tray-App');
 import path from 'path';
 import http from 'http';
@@ -29,8 +29,12 @@ dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat } from './heartbeat';
-import { startScreenshots, stopScreenshots, captureAndUploadOnce, setCaptureFailedCallback } from './screenshot';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback } from './screenshot';
 import { flushQueue } from './offline-queue';
+import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
+import { startRecording, stopRecording, getRecordingStatus, registerRecordingIpcHandlers, destroyRecorderWindow } from './recording';
+import { initTranscription, resetTranscript, getFullTranscript, processAudioChunk } from './transcription';
+import { io as ioClient, Socket as TraySocket } from 'socket.io-client';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const AutoLaunch = require('auto-launch') as new (opts: { name: string; isHidden: boolean }) => { enable: () => void };
@@ -82,6 +86,8 @@ interface AgentState {
 let tray: Tray | null = null;
 let loginWindow: BrowserWindow | null = null;
 let statusWindow: BrowserWindow | null = null;
+let autrixWindow: BrowserWindow | null = null;
+let traySocket: TraySocket | null = null;
 
 let breakNotifyIntervalId: ReturnType<typeof setInterval> | null = null;
 let resyncIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -110,9 +116,28 @@ let agentState: AgentState = {
 /* ─────────────────────────────────────────────────────────────────
    State broadcast helpers
 ───────────────────────────────────────────────────────────────── */
+const STATUS_HEIGHT_BASE = 400;
+const STATUS_HEIGHT_CALL = 468;
+
 const broadcastState = () => {
   if (statusWindow && !statusWindow.isDestroyed()) {
-    statusWindow.webContents.send('status:update', agentState);
+    const callState = getCurrentCall();
+    const targetH = callState ? STATUS_HEIGHT_CALL : STATUS_HEIGHT_BASE;
+    const [currentW, currentH] = statusWindow.getSize();
+    if (currentH !== targetH) {
+      const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+      statusWindow.setSize(currentW, targetH);
+      statusWindow.setPosition(screenW - currentW - 16, screenH - targetH - 16);
+    }
+    statusWindow.webContents.send('status:update', {
+      ...agentState,
+      activeCall: callState ? {
+        meetingId: callState.meetingId,
+        title: callState.title,
+        canRecord: callState.canRecord,
+        isRecording: getRecordingStatus() === 'recording',
+      } : null,
+    });
   }
   updateTrayIcon();
   tray?.setContextMenu(buildTrayMenu());
@@ -170,6 +195,36 @@ const buildTrayMenu = () => {
     });
     items.push({ type: 'separator' });
     items.push({ label: 'Open CRM', click: () => shell.openExternal(CRM_URL) });
+
+    // ── Call / recording items (only when in an active call) ───────────────
+    const activeCall = getCurrentCall();
+    if (activeCall) {
+      items.push({ type: 'separator' });
+      items.push({ label: `In Call: ${activeCall.title || 'Meeting'}`, enabled: false });
+
+      if (activeCall.canRecord) {
+        const recStatus = getRecordingStatus();
+        if (recStatus === 'idle') {
+          items.push({
+            label: '⏺ Start Recording',
+            click: () => handleStartRecording(activeCall),
+          });
+        } else if (recStatus === 'recording') {
+          items.push({
+            label: '⏹ Stop & Save Recording',
+            click: handleStopRecording,
+          });
+        } else {
+          items.push({ label: '⏳ Saving recording…', enabled: false });
+        }
+      }
+
+      items.push({
+        label: '✦ Open Autrix AI',
+        click: showAutrixWindow,
+      });
+    }
+
     items.push({ type: 'separator' });
     items.push({ label: 'Sign Out', click: handleLogout });
   } else {
@@ -241,6 +296,124 @@ const createStatusWindow = () => {
 const showLoginWindow = () => {
   if (!loginWindow || loginWindow.isDestroyed()) createLoginWindow();
   else loginWindow.show();
+};
+
+/* ─────────────────────────────────────────────────────────────────
+   Autrix AI window
+───────────────────────────────────────────────────────────────── */
+const createAutrixWindow = () => {
+  const display = screen.getPrimaryDisplay();
+  const { width } = display.workAreaSize;
+
+  autrixWindow = new BrowserWindow({
+    width: 320,
+    height: 520,
+    x: width - 336,
+    y: 60,
+    resizable: true,
+    minWidth: 280,
+    minHeight: 400,
+    frame: false,
+    transparent: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    title: 'Autrix AI',
+    webPreferences: {
+      preload: path.join(__dirname, 'autrix-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  autrixWindow.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'autrix.html'));
+  autrixWindow.on('closed', () => { autrixWindow = null; });
+};
+
+const showAutrixWindow = () => {
+  if (!autrixWindow || autrixWindow.isDestroyed()) createAutrixWindow();
+  autrixWindow?.show();
+  autrixWindow?.focus();
+};
+
+/* ─────────────────────────────────────────────────────────────────
+   Tray socket — real-time commands from backend (recording triggers)
+───────────────────────────────────────────────────────────────── */
+const connectTraySocket = (token: string) => {
+  if (traySocket?.connected) return;
+  if (traySocket) { traySocket.removeAllListeners(); traySocket.disconnect(); }
+
+  traySocket = ioClient(API_URL, {
+    path: '/socket/supraspace',
+    auth: { token },
+    reconnection: true,
+    reconnectionAttempts: 10,
+    reconnectionDelay: 3000,
+    reconnectionDelayMax: 15_000,
+    transports: ['websocket', 'polling'],
+  });
+
+  traySocket.on('connect', () => {
+    console.log('[Tray Socket] Connected:', traySocket?.id);
+  });
+
+  traySocket.on('tray:start-recording', () => {
+    const call = getCurrentCall();
+    if (call && call.canRecord) handleStartRecording(call);
+  });
+
+  traySocket.on('tray:stop-recording', () => {
+    handleStopRecording();
+  });
+
+  traySocket.on('disconnect', (reason) => {
+    console.log('[Tray Socket] Disconnected:', reason);
+  });
+
+  traySocket.on('connect_error', (err) => {
+    console.warn('[Tray Socket] Connection error:', err.message);
+  });
+};
+
+const disconnectTraySocket = () => {
+  if (traySocket) {
+    traySocket.removeAllListeners();
+    traySocket.disconnect();
+    traySocket = null;
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────
+   Recording handlers
+───────────────────────────────────────────────────────────────── */
+const handleStartRecording = (call: ActiveCallState) => {
+  const token = store.get('crm_token') as string | undefined;
+  if (!token) return;
+
+  resetTranscript();
+  initTranscription(API_URL, token, (text) => {
+    // Push transcript updates to the Autrix window if it's open
+    if (autrixWindow && !autrixWindow.isDestroyed()) {
+      autrixWindow.webContents.send('autrix:transcript-update', text);
+    }
+  });
+
+  startRecording(call.meetingId, {
+    onStatusChange: () => { tray?.setContextMenu(buildTrayMenu()); broadcastState(); },
+    onChunkReady: (audioBuffer, chunkIndex) => {
+      processAudioChunk(audioBuffer, chunkIndex).catch(() => {});
+    },
+  }).catch(() => {});
+};
+
+const handleStopRecording = () => {
+  stopRecording().then(() => {
+    tray?.setContextMenu(buildTrayMenu());
+    broadcastState();
+    if (autrixWindow && !autrixWindow.isDestroyed()) {
+      autrixWindow.webContents.send('autrix:call-ended');
+    }
+  }).catch(() => {});
 };
 
 const showStatusWindow = () => {
@@ -320,6 +493,22 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       todayTotalActiveMs = (s.todayTotalActiveSeconds ?? 0) * 1000;
       agentState.todayTotalActiveMs = todayTotalActiveMs;
 
+      // If activityStartMs is from before today's MDT midnight it's a stale carry-over
+      // from a shift that ran across midnight. Reset it so the tray timer doesn't display
+      // yesterday's elapsed time (e.g. 12+ hours) as today's work time.
+      // The COMPANY_TZ_OFFSET_MINUTES constant is defined on the backend (UTC-6 = -360 min).
+      // We replicate the same arithmetic here: MDT midnight = today's UTC midnight + 6h.
+      const MDT_OFFSET_MS = -6 * 60 * 60 * 1000; // UTC-6
+      const nowInMDT = new Date(Date.now() + MDT_OFFSET_MS);
+      const todayMDTDateStr = nowInMDT.toISOString().split('T')[0];
+      const todayMDTMidnightUTC = new Date(todayMDTDateStr + 'T00:00:00.000Z').getTime() - MDT_OFFSET_MS;
+      if (activityStartMs !== null && activityStartMs < todayMDTMidnightUTC) {
+        activityStartMs = null;
+        agentState.activityStartMs = null;
+        stopScreenshots();
+        agentState.nextScreenshotIn = null;
+      }
+
       // Reconcile activity tracking with authoritative server state.
       // Socket event handlers handle real-time transitions; syncShiftState
       // patches missed socket events (missed break-in, missed time-out).
@@ -360,23 +549,23 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (isNowTracking && activityStartMs === null) {
-        // Active but no local interval. Only auto-resume when the shift was started
-        // very recently (within the last 5 minutes) — that covers the legitimate
-        // "user just clicked Start Shift in the CRM, then opens the tray" handoff.
+        // Active but no local interval. Auto-resume tracking when:
+        //  (a) shift started < 5 min ago — covers the "user just clicked Start Shift
+        //      in the CRM, then the tray opens/syncs" handoff, OR
+        //  (b) shift is from TODAY (MDT) — covers tray restarts during an active shift
+        //      (crash, auto-update, system reboot). The idle monitor handles mid-session
+        //      pauses; syncShiftState must handle the cold-start case.
         //
-        // For older unclosed clock-ins (e.g. a forgotten clock-out from earlier
-        // today or yesterday), DO NOT auto-start the activity counter. The tray
-        // still reflects the on-shift status from the backend so the user can see
-        // the stale shift, but the timer stays paused until the user explicitly
-        // clicks Start Shift (which we treat as "Resume" if backend says they're
-        // already clocked in — see timeclock:action handler below).
+        // Shifts from a PREVIOUS day that were never clocked out are left paused —
+        // the user sees "Shift Open — Tap Resume" and can close or resume explicitly.
         const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
         const shiftStartedAtMs = agentState.shiftStartedAt
           ? new Date(agentState.shiftStartedAt).getTime() : 0;
         const shiftStartedRecently = shiftStartedAtMs > 0
           && (Date.now() - shiftStartedAtMs) < SHIFT_AUTO_RESUME_MS;
+        const isFromToday = !!s.isShiftFromToday;
 
-        if (shiftStartedRecently) {
+        if (shiftStartedRecently || isFromToday) {
           const serverIntervalStart = s.currentIntervalStartAt
             ? new Date(s.currentIntervalStartAt).getTime() : null;
           if (serverIntervalStart && serverIntervalStart >= shiftStartedAtMs && serverIntervalStart <= Date.now()) {
@@ -387,9 +576,18 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
           agentState.activityStartMs = activityStartMs;
           startScreenshots(API_URL, token);
         }
-        // else: leave activityStartMs = null. User must explicitly click Start Shift.
+        // else: shift from a previous day with no recent tracking — show "Shift Open — Tap Resume"
       } else {
         agentState.activityStartMs = activityStartMs;
+      }
+
+      // Watchdog: if we should be tracking (on shift, not on break, not idle,
+      // activityStartMs is set) but the screenshot interval has silently died
+      // (socket reconnect, edge-case stopScreenshots call, etc.), restart it.
+      // syncShiftState runs every 60s so any gap is self-healed within a minute.
+      if (isNowTracking && activityStartMs !== null && !isScreenshotRunning()) {
+        startScreenshots(API_URL, token);
+        agentState.nextScreenshotIn = new Date(Date.now() + 10 * 60 * 1000).toISOString();
       }
 
       broadcastState();
@@ -440,10 +638,13 @@ const startAgentServices = async (token: string) => {
     const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
 
     if (isIdle && !wasIdle) {
-      // User just went idle — save the completed active interval if we were counting
+      // User just went idle — save the completed active interval if we were counting.
+      // Truncate endAt to when the user last had input rather than using Date.now(),
+      // which would include sleep time if the computer just woke from suspension.
       if (wasTracking && activityStartMs !== null) {
         const currentToken = store.get('crm_token') as string | undefined;
-        const endAt = new Date();
+        const idleSec = powerMonitor.getSystemIdleTime();
+        const endAt = new Date(Date.now() - idleSec * 1000);
         const durationMs = endAt.getTime() - activityStartMs;
         if (currentToken && durationMs >= 30_000) {
           try {
@@ -531,8 +732,15 @@ const startAgentServices = async (token: string) => {
     (partial) => {
       const prevIsOnBreak = agentState.isOnBreak;
       const prevIsOnShift = agentState.isOnShift;
-      // "was counting" = clocked in and not on break and not idle
-      const wasTracking = prevIsOnShift && !prevIsOnBreak && !agentState.isIdle;
+      // "was counting" = clocked in and not on break, not idle, AND the interval timer was running.
+      // Including activityStartMs !== null prevents "Shift Open — Tap Resume" state (isOnShift=true,
+      // isOnBreak=false, activityStartMs=null) from being treated as wasTracking=true, which would
+      // cause break-out events to be a no-op (both wasTracking and isNowTracking stay true → no transition fires).
+      const wasTracking = prevIsOnShift && !prevIsOnBreak && !agentState.isIdle && activityStartMs !== null;
+      // Detect a break-out event specifically so we can force-resume when the tray was in
+      // "Tap Resume" state (activityStartMs=null, isOnBreak already false locally) and thus
+      // prevIsOnBreak=false — meaning justEndedBreak would be false, but we still need to resume.
+      const isBreakOutEvent = 'isOnBreak' in partial && (partial as { isOnBreak: boolean }).isOnBreak === false && !('isOnShift' in partial);
 
       agentState = { ...agentState, ...partial };
       agentState.isAgentOnline = true;
@@ -570,16 +778,21 @@ const startAgentServices = async (token: string) => {
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (!wasTracking && isNowTracking) {
-        // Clocked in or resumed from break (not idle) — start a new active interval.
-        // Gate to "very recent" shift to avoid the socket reconnect race where an
-        // initial-state emission for an older open shift would auto-resume tracking
-        // without the user explicitly clicking Start/Resume in the tray.
+        // Transition from not-tracking → tracking. Two legitimate paths:
+        //  (a) User just ended a break elsewhere (wasOnBreak transitioning false) —
+        //      they're actively back at work, resume tracking regardless of shift age.
+        //  (b) Shift was just started (< 5 min ago) — fresh handoff from CRM clock-in.
+        //
+        // We DON'T auto-resume for stale opens (e.g. socket reconnect surfacing an
+        // older unclosed shift) — that's what the "Shift Open — Tap Resume" state is for.
         const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
         const shiftStartedAtMs = agentState.shiftStartedAt
           ? new Date(agentState.shiftStartedAt).getTime() : 0;
         const shiftStartedRecently = shiftStartedAtMs > 0
           && (Date.now() - shiftStartedAtMs) < SHIFT_AUTO_RESUME_MS;
-        if (shiftStartedRecently) {
+        const justEndedBreak = prevIsOnBreak && !agentState.isOnBreak;
+
+        if (justEndedBreak || shiftStartedRecently || (isBreakOutEvent && activityStartMs === null)) {
           activityStartMs = Date.now();
           agentState.activityStartMs = activityStartMs;
           const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
@@ -616,6 +829,16 @@ const startAgentServices = async (token: string) => {
     const currentToken = store.get('crm_token') as string | undefined;
     if (currentToken) syncShiftState(currentToken);
   }, 5 * 60 * 1000);
+
+  // Poll for active call state every 10s — drives recording/Autrix menu visibility
+  startCallStatePolling(
+    API_URL,
+    () => store.get('crm_token') as string | undefined,
+    (_call) => { tray?.setContextMenu(buildTrayMenu()); broadcastState(); },
+  );
+
+  // Real-time socket — receives tray:start-recording / tray:stop-recording from backend
+  connectTraySocket(token);
 };
 
 const stopAgentServices = () => {
@@ -636,6 +859,13 @@ const stopAgentServices = () => {
   stopHeartbeat();
   stopScreenshots();
   disconnectSocket();
+  stopCallStatePolling();
+  disconnectTraySocket();
+  destroyRecorderWindow();
+  if (autrixWindow && !autrixWindow.isDestroyed()) {
+    autrixWindow.close();
+    autrixWindow = null;
+  }
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -768,23 +998,49 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
     // older shifts, so the user has to click Start Shift again to opt in. Treat
     // that click as "resume tracking on the existing shift" rather than an error.
     if (type === 'time-in' && /already clocked in/i.test(msg)) {
-      try {
-        await syncShiftState(token);
-        if (agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle && activityStartMs === null) {
-          activityStartMs = Date.now();
-          agentState.activityStartMs = activityStartMs;
-          startScreenshots(API_URL, token);
-          pingHeartbeat();
-          broadcastState();
-        }
-        return { success: true };
-      } catch {
-        return { success: false, error: msg };
+      // Backend confirmed user IS on shift — assert isOnShift immediately so
+      // the UI shows at least "Shift Open — Tap Resume" even if syncShiftState
+      // fails silently (network error, server down, etc.).
+      agentState.isOnShift = true;
+      await syncShiftState(token); // never throws; updates agentState on success
+      if (agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle && activityStartMs === null) {
+        activityStartMs = Date.now();
+        agentState.activityStartMs = activityStartMs;
+        startScreenshots(API_URL, token);
+        pingHeartbeat();
       }
+      broadcastState(); // always broadcast so UI reflects correct shift state
+      return { success: true };
     }
     return { success: false, error: msg };
   }
 });
+
+/* ─────────────────────────────────────────────────────────────────
+   Autrix AI IPC handlers
+───────────────────────────────────────────────────────────────── */
+ipcMain.handle('autrix:get-token', () => store.get('crm_token') as string | undefined ?? '');
+ipcMain.handle('autrix:get-api-url', () => API_URL);
+ipcMain.handle('autrix:get-transcript', () => getFullTranscript());
+ipcMain.handle('autrix:get-call-info', () => {
+  const call = getCurrentCall();
+  if (!call) return null;
+  return {
+    title: call.title ?? 'Meeting',
+    meetingId: call.meetingId,
+    isRecording: getRecordingStatus() === 'recording',
+  };
+});
+ipcMain.handle('autrix:close', () => {
+  autrixWindow?.hide();
+});
+ipcMain.handle('autrix:open', () => showAutrixWindow());
+
+ipcMain.handle('recording:start-request', () => {
+  const call = getCurrentCall();
+  if (call && call.canRecord) handleStartRecording(call);
+});
+ipcMain.handle('recording:stop-request', () => handleStopRecording());
 
 /* ─────────────────────────────────────────────────────────────────
    Auth via token — shared by protocol URL and local HTTP server
@@ -892,6 +1148,7 @@ app.on('open-url', (_event, url) => handleProtocolUrl(url));
 app.whenReady().then(async () => {
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
   try { autoLauncher.enable(); } catch { } // register with auto-launch as fallback
+  registerRecordingIpcHandlers();
   startLocalAuthServer();
 
   tray = new Tray(getTrayIcon());

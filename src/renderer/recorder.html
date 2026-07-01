@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Recorder</title>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+
+  const api = window.recorderAPI;
+
+  let mediaRecorder = null;
+  let videoChunks = [];
+  let audioRecorder = null;
+  let audioChunks = [];
+  let audioChunkIndex = 0;
+  let audioChunkTimer = null;
+  let displayStream = null;
+  let micStream = null;
+  let mixedStream = null;
+  let audioCtx = null;
+
+  function stopAllStreams() {
+    displayStream?.getTracks().forEach(t => t.stop());
+    micStream?.getTracks().forEach(t => t.stop());
+    if (audioCtx && audioCtx.state !== 'closed') {
+      audioCtx.close().catch(() => {});
+    }
+    displayStream = null;
+    micStream = null;
+    mixedStream = null;
+    audioCtx = null;
+  }
+
+  function flushAudioChunk() {
+    if (!audioRecorder || audioRecorder.state === 'inactive') return;
+    audioRecorder.stop();
+  }
+
+  function startAudioChunking() {
+    // Restart audio-only MediaRecorder every 60s to emit transcript chunks
+    audioChunkTimer = setInterval(() => {
+      flushAudioChunk();
+    }, 60_000);
+  }
+
+  api.onStart(async ({ sourceId }) => {
+    try {
+      // ── Screen video + system audio via desktopCapturer source ──────────────
+      const displayConstraints = {
+        audio: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId,
+          },
+        },
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId,
+            maxWidth: 1920,
+            maxHeight: 1080,
+            maxFrameRate: 15,
+          },
+        },
+      };
+
+      displayStream = await navigator.mediaDevices.getUserMedia(displayConstraints);
+
+      // ── Microphone ──────────────────────────────────────────────────────────
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      } catch {
+        // Mic not available — proceed without it
+        micStream = null;
+      }
+
+      // ── Mix audio tracks ────────────────────────────────────────────────────
+      audioCtx = new AudioContext();
+      const dest = audioCtx.createMediaStreamDestination();
+
+      const sysAudioTracks = displayStream.getAudioTracks();
+      if (sysAudioTracks.length > 0) {
+        const sysSource = audioCtx.createMediaStreamSource(new MediaStream(sysAudioTracks));
+        sysSource.connect(dest);
+      }
+
+      if (micStream) {
+        const micSource = audioCtx.createMediaStreamSource(micStream);
+        micSource.connect(dest);
+      }
+
+      const videoTracks = displayStream.getVideoTracks();
+      mixedStream = new MediaStream([...videoTracks, ...dest.stream.getAudioTracks()]);
+
+      // ── Main video+audio recorder ──────────────────────────────────────────
+      videoChunks = [];
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? 'video/webm;codecs=vp9,opus'
+        : 'video/webm';
+
+      mediaRecorder = new MediaRecorder(mixedStream, { mimeType, videoBitsPerSecond: 1_500_000 });
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) videoChunks.push(e.data);
+      };
+      mediaRecorder.start(5000); // collect in 5s chunks for robustness
+
+      // ── Audio-only recorder for transcription chunks ───────────────────────
+      audioChunks = [];
+      audioChunkIndex = 0;
+      const audioOnlyStream = new MediaStream(dest.stream.getAudioTracks());
+      const audioMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : 'audio/webm';
+
+      function startNewAudioRecorder() {
+        audioChunks = [];
+        audioRecorder = new MediaRecorder(audioOnlyStream, { mimeType: audioMime });
+        audioRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) audioChunks.push(e.data);
+        };
+        audioRecorder.onstop = () => {
+          const blob = new Blob(audioChunks, { type: audioMime });
+          blob.arrayBuffer().then((ab) => {
+            api.sendAudioChunk(Array.from(new Uint8Array(ab)), audioChunkIndex);
+            audioChunkIndex++;
+            // Start next chunk immediately
+            startNewAudioRecorder();
+            audioRecorder.start();
+          }).catch(() => {});
+        };
+        audioRecorder.start();
+      }
+
+      startNewAudioRecorder();
+      startAudioChunking();
+
+    } catch (err) {
+      api.sendError(err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  api.onStop(() => {
+    clearInterval(audioChunkTimer);
+
+    if (audioRecorder && audioRecorder.state !== 'inactive') {
+      audioRecorder.stop();
+    }
+
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      stopAllStreams();
+      api.sendReady([]);
+      return;
+    }
+
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(videoChunks, { type: 'video/webm' });
+      blob.arrayBuffer().then((ab) => {
+        api.sendReady(Array.from(new Uint8Array(ab)));
+        stopAllStreams();
+      }).catch(() => {
+        api.sendReady([]);
+        stopAllStreams();
+      });
+    };
+
+    mediaRecorder.stop();
+  });
+})();
+</script>
+</body>
+</html>

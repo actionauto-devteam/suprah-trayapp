@@ -329,6 +329,109 @@
 
     .btn-red { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
     .btn-red:hover { background: rgba(239,68,68,0.25); }
+
+    /* Call section */
+    .call-section {
+      display: none;
+      padding: 10px 16px 12px;
+      border-bottom: 1px solid #1a1a1a;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .call-section.visible { display: flex; }
+
+    .call-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .call-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #4ade80;
+      background: rgba(74,222,128,0.08);
+      border: 1px solid rgba(74,222,128,0.18);
+      border-radius: 999px;
+      padding: 2px 8px;
+    }
+    .call-badge-dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #4ade80;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    .call-title {
+      font-size: 11px;
+      color: #555;
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .call-btns {
+      display: flex;
+      gap: 6px;
+    }
+
+    .btn-record {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(239,68,68,0.25);
+      background: rgba(239,68,68,0.08);
+      color: #f87171;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      letter-spacing: 0.02em;
+    }
+    .btn-record:hover { background: rgba(239,68,68,0.16); }
+    .btn-record.recording {
+      border-color: rgba(239,68,68,0.4);
+      background: rgba(239,68,68,0.15);
+      color: #fca5a5;
+    }
+    .btn-record.saving { opacity: 0.5; cursor: not-allowed; }
+    .btn-record:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .rec-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #f87171;
+      animation: pulse 1s ease-in-out infinite;
+    }
+
+    .btn-autrix {
+      flex: 1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(139,92,246,0.25);
+      background: rgba(139,92,246,0.08);
+      color: #a78bfa;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.15s;
+      letter-spacing: 0.02em;
+    }
+    .btn-autrix:hover { background: rgba(139,92,246,0.16); }
   </style>
 </head>
 <body>
@@ -361,6 +464,20 @@
       <div class="timer-row" id="breakRow" style="display:none">
         <span class="timer-label">Total Break</span>
         <span class="timer-value break" id="breakTimer">--:--:--</span>
+      </div>
+    </div>
+
+    <!-- Call section (shown when activeCall is present) -->
+    <div class="call-section" id="callSection">
+      <div class="call-header">
+        <div class="call-badge">
+          <span class="call-badge-dot"></span>
+          In Call
+        </div>
+        <span class="call-title" id="callTitle">Meeting</span>
+      </div>
+      <div class="call-btns" id="callBtns">
+        <!-- record button injected via JS based on canRecord -->
       </div>
     </div>
 
@@ -732,9 +849,70 @@
       await window.trayAPI.logout();
     });
 
+    // ── Call section ─────────────────────────────────────────────────
+    let recordingState = 'idle'; // 'idle' | 'recording' | 'saving'
+
+    const updateCallSection = (s) => {
+      const section = document.getElementById('callSection');
+      const callBtns = document.getElementById('callBtns');
+
+      if (!s.activeCall) {
+        section.classList.remove('visible');
+        return;
+      }
+
+      section.classList.add('visible');
+      document.getElementById('callTitle').textContent = s.activeCall.title || 'Meeting';
+
+      // Sync local recording state from authoritative server state
+      if (s.activeCall.isRecording && recordingState !== 'saving') recordingState = 'recording';
+      else if (!s.activeCall.isRecording && recordingState === 'recording') recordingState = 'idle';
+
+      // Rebuild buttons
+      callBtns.innerHTML = '';
+
+      if (s.activeCall.canRecord) {
+        const recBtn = document.createElement('button');
+        recBtn.className = 'btn-record' +
+          (recordingState === 'recording' ? ' recording' : '') +
+          (recordingState === 'saving' ? ' saving' : '');
+        recBtn.disabled = recordingState === 'saving';
+
+        if (recordingState === 'recording') {
+          recBtn.innerHTML = '<span class="rec-dot"></span> Stop & Save';
+        } else if (recordingState === 'saving') {
+          recBtn.textContent = 'Saving…';
+        } else {
+          recBtn.textContent = '⏺ Record';
+        }
+
+        recBtn.addEventListener('click', async () => {
+          if (recordingState === 'idle') {
+            recordingState = 'recording';
+            updateCallSection(state);
+            await window.trayAPI.startRecording();
+          } else if (recordingState === 'recording') {
+            recordingState = 'saving';
+            updateCallSection(state);
+            await window.trayAPI.stopRecording();
+            recordingState = 'idle';
+            updateCallSection(state);
+          }
+        });
+
+        callBtns.appendChild(recBtn);
+      }
+
+      const autrixBtn = document.createElement('button');
+      autrixBtn.className = 'btn-autrix';
+      autrixBtn.textContent = '✦ Autrix';
+      autrixBtn.addEventListener('click', () => window.trayAPI.openAutrix());
+      callBtns.appendChild(autrixBtn);
+    };
+
     // ── State sync ───────────────────────────────────────────────────
-    window.trayAPI.onStatusUpdate((data) => applyState(data));
-    window.trayAPI.getStatus().then(applyState);
+    window.trayAPI.onStatusUpdate((data) => { applyState(data); updateCallSection(data); });
+    window.trayAPI.getStatus().then((data) => { applyState(data); updateCallSection(data); });
     window.trayAPI.getAppVersion().then(v => {
       document.getElementById('appVersion').textContent = `v${v}`;
     });

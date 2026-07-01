@@ -159,6 +159,10 @@ export function stopScreenshots(): void {
   }
 }
 
+export function isScreenshotRunning(): boolean {
+  return intervalId !== null;
+}
+
 export function updateToken(newToken: string): void {
   token = newToken;
 }

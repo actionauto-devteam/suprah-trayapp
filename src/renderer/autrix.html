@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Autrix AI</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f0f;
+      color: #e5e5e5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+      font-size: 13px;
+    }
+
+    /* Drag bar */
+    .drag-bar {
+      -webkit-app-region: drag;
+      height: 40px;
+      background: #111;
+      border-bottom: 1px solid #222;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      flex-shrink: 0;
+      gap: 8px;
+    }
+
+    .drag-bar-logo {
+      width: 20px;
+      height: 20px;
+      background: linear-gradient(135deg, #7c3aed, #4f46e5);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: white;
+      font-weight: 800;
+      flex-shrink: 0;
+    }
+
+    .drag-bar-title {
+      flex: 1;
+      font-size: 12px;
+      font-weight: 600;
+      color: #a0a0a0;
+    }
+
+    .drag-bar-rec {
+      -webkit-app-region: no-drag;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: #ef4444;
+      font-weight: 600;
+    }
+
+    .rec-dot {
+      width: 7px;
+      height: 7px;
+      background: #ef4444;
+      border-radius: 50%;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+
+    .btn-close {
+      -webkit-app-region: no-drag;
+      width: 24px;
+      height: 24px;
+      border: none;
+      background: transparent;
+      color: #666;
+      cursor: pointer;
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      transition: background 0.15s;
+    }
+    .btn-close:hover { background: #1e1e1e; color: #e5e5e5; }
+
+    /* Transcript strip */
+    .transcript-strip {
+      background: #0c0c0c;
+      border-bottom: 1px solid #1e1e1e;
+      padding: 6px 12px;
+      font-size: 11px;
+      color: #555;
+      flex-shrink: 0;
+      max-height: 48px;
+      overflow: hidden;
+      line-height: 1.4;
+      display: none;
+    }
+    .transcript-strip.visible { display: block; }
+    .transcript-strip .label { color: #3f3f3f; font-weight: 600; margin-right: 4px; }
+
+    /* Messages */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      scrollbar-width: thin;
+      scrollbar-color: #222 transparent;
+    }
+
+    .messages::-webkit-scrollbar { width: 4px; }
+    .messages::-webkit-scrollbar-track { background: transparent; }
+    .messages::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 4px; }
+
+    .msg {
+      max-width: 90%;
+      padding: 8px 10px;
+      border-radius: 10px;
+      line-height: 1.5;
+      word-break: break-word;
+      white-space: pre-wrap;
+      font-size: 12.5px;
+    }
+
+    .msg.user {
+      background: #1e1e3a;
+      border: 1px solid #2d2d5e;
+      align-self: flex-end;
+      color: #c7c7f0;
+    }
+
+    .msg.assistant {
+      background: #161616;
+      border: 1px solid #222;
+      align-self: flex-start;
+      color: #e0e0e0;
+    }
+
+    .msg.streaming::after {
+      content: '▋';
+      display: inline-block;
+      animation: blink 0.8s step-end infinite;
+      color: #7c3aed;
+    }
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    .msg-meta {
+      font-size: 10px;
+      color: #444;
+      margin-top: 3px;
+    }
+    .msg.assistant .msg-meta { text-align: left; }
+    .msg.user .msg-meta { text-align: right; }
+
+    /* Suggestions */
+    .suggestions {
+      padding: 6px 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      flex-shrink: 0;
+      border-top: 1px solid #1a1a1a;
+    }
+
+    .suggestion-btn {
+      background: #1a1a1a;
+      border: 1px solid #2a2a2a;
+      color: #888;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .suggestion-btn:hover { background: #222; color: #c0c0c0; border-color: #333; }
+
+    /* Input area */
+    .input-area {
+      padding: 10px 12px;
+      border-top: 1px solid #1e1e1e;
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+      flex-shrink: 0;
+      background: #0f0f0f;
+    }
+
+    textarea {
+      flex: 1;
+      background: #161616;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      color: #e5e5e5;
+      padding: 7px 10px;
+      font-size: 12.5px;
+      font-family: inherit;
+      resize: none;
+      outline: none;
+      line-height: 1.4;
+      min-height: 36px;
+      max-height: 90px;
+      overflow-y: auto;
+      transition: border-color 0.15s;
+    }
+    textarea:focus { border-color: #4f46e5; }
+    textarea::placeholder { color: #3a3a3a; }
+
+    .send-btn {
+      width: 36px;
+      height: 36px;
+      background: #4f46e5;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      color: white;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.15s;
+    }
+    .send-btn:hover { background: #4338ca; }
+    .send-btn:disabled { background: #1e1e1e; color: #333; cursor: not-allowed; }
+
+    .empty-state {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: #333;
+      padding: 24px;
+      text-align: center;
+    }
+    .empty-icon { font-size: 28px; }
+    .empty-label { font-size: 12px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+
+<div class="drag-bar">
+  <div class="drag-bar-logo">A</div>
+  <div class="drag-bar-title">Autrix AI — Live Meeting</div>
+  <div class="drag-bar-rec" id="recIndicator" style="display:none">
+    <div class="rec-dot"></div>
+    REC
+  </div>
+  <button class="btn-close" id="btnClose" title="Close">✕</button>
+</div>
+
+<div class="transcript-strip" id="transcriptStrip">
+  <span class="label">Transcript:</span>
+  <span id="transcriptPreview"></span>
+</div>
+
+<div class="messages" id="messages">
+  <div class="empty-state" id="emptyState">
+    <div class="empty-icon">✦</div>
+    <div class="empty-label">Ask Autrix anything about the call.<br>Use the suggestions below to get started.</div>
+  </div>
+</div>
+
+<div class="suggestions" id="suggestions">
+  <button class="suggestion-btn" data-prompt="Summarize the call so far.">Summarize call</button>
+  <button class="suggestion-btn" data-prompt="List all action items mentioned in the call.">Action items</button>
+  <button class="suggestion-btn" data-prompt="What key decisions were made so far?">Key decisions</button>
+  <button class="suggestion-btn" data-prompt="Take structured notes on everything discussed so far.">Take notes</button>
+</div>
+
+<div class="input-area">
+  <textarea id="input" placeholder="Ask Autrix about the meeting…" rows="1"></textarea>
+  <button class="send-btn" id="sendBtn" title="Send">↑</button>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const api = window.autrixAPI;
+  const messagesEl = document.getElementById('messages');
+  const inputEl = document.getElementById('input');
+  const sendBtn = document.getElementById('sendBtn');
+  const emptyState = document.getElementById('emptyState');
+  const transcriptStrip = document.getElementById('transcriptStrip');
+  const transcriptPreview = document.getElementById('transcriptPreview');
+  const recIndicator = document.getElementById('recIndicator');
+  const btnClose = document.getElementById('btnClose');
+
+  let isLoading = false;
+  let apiUrl = '';
+  let token = '';
+  let callTitle = 'Meeting';
+  let transcript = '';
+  let isRecording = false;
+
+  // ── Init ─────────────────────────────────────────────────────────────────────
+  async function init() {
+    [apiUrl, token] = await Promise.all([api.getApiUrl(), api.getToken()]);
+    const info = await api.getCallInfo();
+    if (info?.title) callTitle = info.title;
+    if (info?.isRecording) showRecIndicator(true);
+
+    const savedTranscript = await api.getTranscript();
+    if (savedTranscript) {
+      transcript = savedTranscript;
+      updateTranscriptStrip();
+    }
+  }
+
+  function showRecIndicator(show) {
+    recIndicator.style.display = show ? 'flex' : 'none';
+    isRecording = show;
+  }
+
+  function updateTranscriptStrip() {
+    if (!transcript) { transcriptStrip.classList.remove('visible'); return; }
+    const preview = transcript.length > 120 ? '…' + transcript.slice(-120) : transcript;
+    transcriptPreview.textContent = preview;
+    transcriptStrip.classList.add('visible');
+  }
+
+  // ── Render messages ──────────────────────────────────────────────────────────
+  function addMessage(role, content, streaming = false) {
+    if (emptyState) emptyState.remove();
+
+    const div = document.createElement('div');
+    div.className = `msg ${role}${streaming ? ' streaming' : ''}`;
+    div.dataset.id = `msg-${Date.now()}`;
+    div.textContent = content;
+
+    const meta = document.createElement('div');
+    meta.className = 'msg-meta';
+    meta.textContent = role === 'assistant' ? 'Autrix' : 'You';
+    div.appendChild(meta);
+
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    return div;
+  }
+
+  function updateMessage(el, content, streaming = false) {
+    // Update just the text node (first child), not the meta div
+    const textNode = el.childNodes[0];
+    if (textNode && textNode.nodeType === Node.TEXT_NODE) {
+      textNode.textContent = content;
+    } else {
+      el.childNodes[0].textContent = content;
+    }
+    if (streaming) el.classList.add('streaming');
+    else el.classList.remove('streaming');
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // ── Send message ─────────────────────────────────────────────────────────────
+  async function sendMessage(text) {
+    const trimmed = text.trim();
+    if (!trimmed || isLoading) return;
+
+    isLoading = true;
+    sendBtn.disabled = true;
+    inputEl.value = '';
+    inputEl.style.height = '';
+
+    addMessage('user', trimmed);
+    const assistantEl = addMessage('assistant', '', true);
+
+    try {
+      const res = await fetch(`${apiUrl}/api/supraleo/meeting-chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          message: trimmed,
+          transcript: transcript || '',
+          callTitle,
+          stream: true,
+        }),
+      });
+
+      if (!res.ok || !res.body) {
+        let errMsg = 'Something went wrong. Please try again.';
+        try {
+          const errBody = await res.json();
+          if (errBody?.message) errMsg = errBody.message;
+        } catch { /* ignore */ }
+        updateMessage(assistantEl, errMsg, false);
+        return;
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine.startsWith('data: ')) continue;
+          const raw = trimmedLine.slice(6).trim();
+          if (!raw || raw === '[DONE]') continue;
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed.type === 'delta' && parsed.text) {
+              accumulated += parsed.text;
+              updateMessage(assistantEl, accumulated, true);
+            } else if (parsed.type === 'done') {
+              updateMessage(assistantEl, accumulated, false);
+            } else if (parsed.type === 'error') {
+              updateMessage(assistantEl, parsed.message || 'Something went wrong.', false);
+            }
+          } catch { /* ignore parse errors */ }
+        }
+      }
+
+      if (accumulated) updateMessage(assistantEl, accumulated, false);
+    } catch {
+      updateMessage(assistantEl, 'Could not reach Autrix. Check your connection.', false);
+    } finally {
+      isLoading = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  // ── Event listeners ──────────────────────────────────────────────────────────
+  sendBtn.addEventListener('click', () => sendMessage(inputEl.value));
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage(inputEl.value);
+    }
+  });
+
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 90) + 'px';
+  });
+
+  document.querySelectorAll('.suggestion-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const prompt = btn.dataset.prompt;
+      if (prompt) sendMessage(prompt);
+    });
+  });
+
+  btnClose.addEventListener('click', () => api.close());
+
+  // ── Transcript updates from main ─────────────────────────────────────────────
+  api.onTranscriptUpdate((text) => {
+    transcript = text;
+    updateTranscriptStrip();
+    showRecIndicator(true);
+  });
+
+  api.onCallEnded(() => {
+    showRecIndicator(false);
+    const div = document.createElement('div');
+    div.style.cssText = 'font-size:11px;color:#444;text-align:center;padding:8px;';
+    div.textContent = '— Call ended —';
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  });
+
+  // ── Start ────────────────────────────────────────────────────────────────────
+  init();
+})();
+</script>
+</body>
+</html>
