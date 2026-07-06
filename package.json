@@ -9,7 +9,8 @@
   "scripts": {
     "start": "tsc && electron .",
     "dev": "tsc && electron .",
-    "build": "tsc && electron-builder --win --x64"
+    "build": "tsc && electron-builder --win --x64",
+    "build:mac": "tsc && electron-builder --mac --x64 --arm64"
   },
   "dependencies": {
     "auto-launch": "^5.0.6",
@@ -44,6 +45,21 @@
       "oneClick": true,
       "perMachine": false,
       "artifactName": "ActionAutoTraySetup.exe"
+    },
+    "mac": {
+      "target": [
+        { "target": "dmg", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "extendInfo": {
+        "NSScreenRecordingUsageDescription": "Action Auto Tray captures periodic screenshots to verify timeproof activity.",
+        "NSScreenCaptureUsageDescription": "Action Auto Tray captures periodic screenshots to verify timeproof activity."
+      }
+    },
+    "dmg": {
+      "artifactName": "ActionAutoTraySetup.dmg"
     },
     "files": [
       "dist/**/*",

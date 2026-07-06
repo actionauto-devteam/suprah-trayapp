@@ -1146,6 +1146,8 @@ app.on('open-url', (_event, url) => handleProtocolUrl(url));
    App ready
 ───────────────────────────────────────────────────────────────── */
 app.whenReady().then(async () => {
+  // Tray-only app — no dock icon on macOS
+  if (process.platform === 'darwin') app.dock?.hide();
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
   try { autoLauncher.enable(); } catch { } // register with auto-launch as fallback
   registerRecordingIpcHandlers();
