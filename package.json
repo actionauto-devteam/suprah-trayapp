@@ -50,7 +50,6 @@
       "target": [
         { "target": "dmg", "arch": ["x64", "arm64"] }
       ],
-      "icon": "assets/icon.icns",
       "category": "public.app-category.productivity",
       "identity": null,
       "extendInfo": {
