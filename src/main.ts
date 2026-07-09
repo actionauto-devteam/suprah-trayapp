@@ -28,8 +28,8 @@ const envPath = app.isPackaged
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
-import { startHeartbeat, stopHeartbeat, pingHeartbeat } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback } from './screenshot';
+import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
 import { startRecording, stopRecording, getRecordingStatus, registerRecordingIpcHandlers, destroyRecorderWindow } from './recording';
@@ -48,6 +48,16 @@ type StoreInstance = {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const Store = require('electron-store').default;
 const store = new Store({ encryptionKey: 'aa-tray-secure-key' }) as StoreInstance;
+
+/* ─────────────────────────────────────────────────────────────────
+   Auth-mode helpers — 'crm' uses /api/crm/* endpoints,
+   'main' uses /api/timeclock/* endpoints (Clerk/main-system JWT)
+───────────────────────────────────────────────────────────────── */
+const getAuthMode = (): 'crm' | 'main' => (store.get('auth_mode') as 'crm' | 'main') || 'crm';
+const getShiftStateUrl  = () => getAuthMode() === 'main' ? '/api/timeclock/shift-state'      : '/api/crm/timeproof/shift-state';
+const getActivityIntervalUrl = () => getAuthMode() === 'main' ? '/api/timeclock/activity-interval' : '/api/crm/timeproof/activity-interval';
+const getResumableShiftUrl   = () => getAuthMode() === 'main' ? '/api/timeclock/resumable-shift'   : '/api/crm/timeproof/resumable-shift';
+const getClockUrl            = () => getAuthMode() === 'main' ? '/api/timeclock/clock'             : '/api/crm/time-clock';
 
 /* ─────────────────────────────────────────────────────────────────
    Config
@@ -459,7 +469,7 @@ const tryRefreshToken = async (token: string): Promise<string | null> => {
 const syncShiftState = async (token: string, retries = 3): Promise<void> => {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const { data } = await axios.get(`${API_URL}/api/crm/timeproof/shift-state`, {
+      const { data } = await axios.get(`${API_URL}${getShiftStateUrl()}`, {
         headers: { Authorization: `Bearer ${token}` },
         timeout: 10_000,
       });
@@ -527,7 +537,7 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         const tkn = store.get('crm_token') as string | undefined;
         if (tkn && durationMs >= 30_000) {
           axios.post(
-            `${API_URL}/api/crm/timeproof/activity-interval`,
+            `${API_URL}${getActivityIntervalUrl()}`,
             { startAt: new Date(activityStartMs).toISOString(), endAt: new Date(stopAt).toISOString() },
             { headers: { Authorization: `Bearer ${tkn}` }, timeout: 10_000 }
           ).then(() => {
@@ -609,6 +619,16 @@ const startAgentServices = async (token: string) => {
   const SCREENSHOT_INTERVAL_MS = 10 * 60 * 1000;
   const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 60 * 1000; // 10 hours — renew before 12h expiry
 
+  // Configure endpoint paths and screenshot mode based on auth mode
+  const authMode = getAuthMode();
+  if (authMode === 'main') {
+    setHeartbeatPath('/api/timeclock/heartbeat');
+    setSkipCaptures(true); // screenshots not yet supported for main-mode users
+  } else {
+    setHeartbeatPath('/api/crm/timeproof/heartbeat');
+    setSkipCaptures(false);
+  }
+
   // Notify the user when screen capture itself fails (upload failures are queued offline)
   setCaptureFailedCallback(() => {
     if (Notification.isSupported()) {
@@ -620,15 +640,20 @@ const startAgentServices = async (token: string) => {
     }
   });
 
-  // Proactively renew token every 10 hours so the tray never goes stale
-  tokenRefreshIntervalId = setInterval(async () => {
+  // Guard screenshots against break state — even if the tray misses a break-in
+  // socket event and stopScreenshots() is never called, the capture loop itself
+  // will skip every interval tick while the agent is on break.
+  setOnBreakGetter(() => agentState.isOnBreak);
+
+  // Proactively renew token every 10 hours (CRM mode only — main JWT is refreshed by the browser)
+  tokenRefreshIntervalId = authMode === 'crm' ? setInterval(async () => {
     const current = store.get('crm_token') as string | undefined;
     if (!current) return;
     const refreshed = await tryRefreshToken(current);
     if (!refreshed) {
       handleLogout();
     }
-  }, TOKEN_REFRESH_INTERVAL_MS);
+  }, TOKEN_REFRESH_INTERVAL_MS) : null;
 
   startIdleMonitor(async (isIdle) => {
     const wasIdle = agentState.isIdle;
@@ -649,7 +674,7 @@ const startAgentServices = async (token: string) => {
         if (currentToken && durationMs >= 30_000) {
           try {
             await axios.post(
-              `${API_URL}/api/crm/timeproof/activity-interval`,
+              `${API_URL}${getActivityIntervalUrl()}`,
               { startAt: new Date(activityStartMs).toISOString(), endAt: endAt.toISOString() },
               { headers: { Authorization: `Bearer ${currentToken}` }, timeout: 10_000 }
             );
@@ -763,7 +788,7 @@ const startAgentServices = async (token: string) => {
           const currentToken = store.get('crm_token') as string | undefined;
           if (currentToken && durationMs >= 30_000) {
             axios.post(
-              `${API_URL}/api/crm/timeproof/activity-interval`,
+              `${API_URL}${getActivityIntervalUrl()}`,
               { startAt: new Date(activityStartMs).toISOString(), endAt: endAt.toISOString() },
               { headers: { Authorization: `Bearer ${currentToken}` }, timeout: 10_000 }
             ).then(() => {
@@ -824,11 +849,13 @@ const startAgentServices = async (token: string) => {
     pingHeartbeat();
   }
 
-  // Re-sync every 5 minutes so activity totals stay in sync with server
+  // Re-sync every 60 seconds (same cadence as heartbeat) so missed socket
+  // events (break-in, break-out, time-out) self-correct within one minute
+  // rather than waiting the old 5-minute window.
   resyncIntervalId = setInterval(() => {
     const currentToken = store.get('crm_token') as string | undefined;
     if (currentToken) syncShiftState(currentToken);
-  }, 5 * 60 * 1000);
+  }, 60 * 1000);
 
   // Poll for active call state every 10s — drives recording/Autrix menu visibility
   startCallStatePolling(
@@ -896,6 +923,7 @@ const handleLogout = async () => {
   activityStartMs = null;
   todayTotalActiveMs = 0;
   store.delete('crm_token');
+  store.delete('auth_mode');
   store.delete('user');
   agentState = {
     isAuthenticated: false,
@@ -953,7 +981,7 @@ ipcMain.handle('shift:check-resumable', async () => {
   const token = store.get('crm_token') as string | undefined;
   if (!token) return { resumable: false };
   try {
-    const { data } = await axios.get(`${API_URL}/api/crm/timeproof/resumable-shift`, {
+    const { data } = await axios.get(`${API_URL}${getResumableShiftUrl()}`, {
       headers: { Authorization: `Bearer ${token}` },
       timeout: 10_000,
     });
@@ -967,11 +995,11 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
   const token = store.get('crm_token') as string | undefined;
   if (!token) return { success: false, error: 'Not authenticated' };
   try {
-    // Capture a screenshot before ending shift as proof of the final screen state
-    if (type === 'time-out') {
+    // Capture a screenshot before ending shift (CRM mode only — main mode skips screenshots)
+    if (type === 'time-out' && getAuthMode() === 'crm') {
       captureAndUploadOnce(API_URL, token).catch(() => {});
     }
-    await axios.post(`${API_URL}/api/crm/time-clock`, { type, ...(note && { note }) }, {
+    await axios.post(`${API_URL}${getClockUrl()}`, { type, ...(note && { note }) }, {
       headers: { Authorization: `Bearer ${token}` },
       timeout: 15_000,
     });
@@ -1051,18 +1079,47 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   if (agentState.isAuthenticated && store.get('crm_token') === token) return true;
 
   const wasAuthenticated = agentState.isAuthenticated;
-  const { data } = await axios.get(`${API_URL}/api/crm/me`, {
-    headers: { Authorization: `Bearer ${token}` },
-    timeout: 10_000,
-  });
-  const user: User = data?.data || data;
+  let user: User | null = null;
+  let authMode: 'crm' | 'main' = 'crm';
+
+  // Try CRM auth first
+  try {
+    const { data } = await axios.get(`${API_URL}/api/crm/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 10_000,
+    });
+    const d: User = data?.data || data;
+    if (d?.fullName) { user = d; authMode = 'crm'; }
+  } catch {
+    // CRM auth failed — fall through to main system auth
+  }
+
+  // Fallback: try main system (Clerk JWT) endpoint
+  if (!user) {
+    try {
+      const { data } = await axios.get(`${API_URL}/api/timeclock/me`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10_000,
+      });
+      const d = data?.data || data;
+      if (d?.fullName) {
+        user = { fullName: d.fullName, username: d.email || d.username || '', role: d.role || 'employee' };
+        authMode = 'main';
+      }
+    } catch {
+      return false;
+    }
+  }
+
   if (!user?.fullName) return false;
 
   agentState.isAuthenticated = true;
   agentState.user = user;
   agentState.isAgentOnline = true;
   store.set('crm_token', token);
+  store.set('auth_mode', authMode);
   store.set('user', user);
+  updateHeartbeatToken(token); // keep heartbeat JWT in sync when page sends a refreshed token
   loginWindow?.close();
   if (!wasAuthenticated) startAgentServices(token);
   broadcastState();
@@ -1174,8 +1231,8 @@ app.whenReady().then(async () => {
     agentState.isAgentOnline = true;
     updateTrayIcon();
     tray.setContextMenu(buildTrayMenu());
-    // Proactively refresh token on startup — use new token if successful, fall back to stored
-    const activeToken = await tryRefreshToken(savedToken) ?? savedToken;
+    // Proactively refresh token on startup (CRM mode only — main JWT is refreshed by the browser)
+    const activeToken = getAuthMode() === 'crm' ? (await tryRefreshToken(savedToken) ?? savedToken) : savedToken;
     startAgentServices(activeToken);
   } else {
     showLoginWindow();

@@ -14,9 +14,19 @@ let apiUrl = '';
 let token = '';
 let captureFailedCb: (() => void) | null = null;
 let lastCaptureFailedAt = 0;
+let getIsOnBreak: () => boolean = () => false;
+let skipCaptures = false;
+
+export function setSkipCaptures(skip: boolean): void {
+  skipCaptures = skip;
+}
 
 export function setCaptureFailedCallback(cb: () => void): void {
   captureFailedCb = cb;
+}
+
+export function setOnBreakGetter(fn: () => boolean): void {
+  getIsOnBreak = fn;
 }
 
 // Use MDT (UTC-6) so shiftDate matches the backend's COMPANY_TZ_OFFSET_MINUTES = -360
@@ -72,8 +82,8 @@ async function captureAllScreens(): Promise<Buffer | null> {
 }
 
 async function captureAndUpload(): Promise<void> {
-  // Skip regular interval captures while idle — one-off idle snapshot is handled separately
-  if (getIsIdle()) return;
+  // Skip regular interval captures while idle, on break, or in skip mode (e.g. main-auth users)
+  if (skipCaptures || getIsIdle() || getIsOnBreak()) return;
 
   try {
     const jpegBuffer = await captureAllScreens();
@@ -157,6 +167,7 @@ export function stopScreenshots(): void {
     clearInterval(intervalId);
     intervalId = null;
   }
+  skipCaptures = false;
 }
 
 export function isScreenshotRunning(): boolean {

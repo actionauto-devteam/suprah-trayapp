@@ -7,18 +7,29 @@ type ShiftState = { isOnBreak: boolean; breakDurationSeconds: number; isOnShift:
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let _ping: (() => Promise<void>) | null = null;
+let heartbeatPath = '/api/crm/timeproof/heartbeat';
+let _activeToken = '';
+
+export function setHeartbeatPath(path: string): void {
+  heartbeatPath = path;
+}
+
+export function updateHeartbeatToken(newToken: string): void {
+  _activeToken = newToken;
+}
 
 export function startHeartbeat(apiUrl: string, token: string, getShiftState: () => ShiftState): void {
   if (intervalId) return;
+  _activeToken = token;
 
   _ping = async () => {
     try {
       const { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt } = getShiftState();
       const isIdle = isOnBreak || !isOnShift ? false : getIsIdle();
       await axios.post(
-        `${apiUrl}/api/crm/timeproof/heartbeat`,
+        `${apiUrl}${heartbeatPath}`,
         { isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 }
+        { headers: { Authorization: `Bearer ${_activeToken}` }, timeout: 10_000 }
       );
     } catch {
       // Silent fail — heartbeat is best-effort
@@ -40,4 +51,6 @@ export function stopHeartbeat(): void {
     intervalId = null;
   }
   _ping = null;
+  _activeToken = '';
+  heartbeatPath = '/api/crm/timeproof/heartbeat';
 }

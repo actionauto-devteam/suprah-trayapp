@@ -1,6 +1,6 @@
 {
   "name": "actionauto-tray",
-  "version": "1.2.6",
+  "version": "1.3.0",
   "description": "Action Auto TimeProof Tray Agent",
   "main": "dist/main.js",
   "author": "Action Auto",
