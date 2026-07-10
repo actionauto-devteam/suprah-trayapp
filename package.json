@@ -19,7 +19,6 @@
     "electron-store": "^11.0.2",
     "electron-updater": "^6.3.9",
     "form-data": "^4.0.5",
-    "keytar": "^7.9.0",
     "socket.io-client": "^4.8.3"
   },
   "devDependencies": {
