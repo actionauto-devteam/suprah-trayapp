@@ -1,6 +1,6 @@
 {
   "name": "actionauto-tray",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Action Auto TimeProof Tray Agent",
   "main": "dist/main.js",
   "author": "Action Auto",
@@ -10,7 +10,7 @@
     "start": "tsc && electron .",
     "dev": "tsc && electron .",
     "build": "tsc && electron-builder --win --x64",
-    "build:mac": "tsc && electron-builder --mac --x64"
+    "build:mac": "tsc && electron-builder --mac --universal"
   },
   "dependencies": {
     "auto-launch": "^5.0.6",
@@ -34,7 +34,8 @@
     "publish": {
       "provider": "github",
       "owner": "actionauto-devteam",
-      "repo": "suprah-trayapp"
+      "repo": "suprah-trayapp",
+      "releaseType": "release"
     },
     "win": {
       "target": "nsis",
@@ -48,7 +49,7 @@
     },
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["x64"] }
+        { "target": "dmg", "arch": ["universal"] }
       ],
       "category": "public.app-category.productivity",
       "identity": null,

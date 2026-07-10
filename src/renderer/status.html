@@ -447,6 +447,14 @@
       <div class="agent-dot" id="agentDot"></div>
     </div>
 
+    <!-- Waiting-for-sign-in panel — shown instead of everything below when not yet authenticated -->
+    <div class="waiting-panel" id="waitingPanel" style="display:none; padding: 20px 16px;">
+      <p style="font-size:12px; color:#999; line-height:1.6; margin-bottom:14px;">
+        Not signed in yet. Sign in on the dashboard in your browser — this window will connect automatically, no need to log in here.
+      </p>
+      <button class="btn btn-primary" id="openCrmWaitingBtn">Open Dashboard</button>
+    </div>
+
     <!-- Status pill -->
     <div class="status-section">
       <div class="status-pill offline" id="statusPill">
@@ -618,6 +626,24 @@
 
     const applyState = (s) => {
       state = s;
+
+      // Not signed in yet — show the waiting panel only, hide everything shift-related.
+      // Signing in happens on the dashboard in the browser; this window picks it up
+      // automatically, no login form here.
+      const waitingPanel = document.getElementById('waitingPanel');
+      const isWaiting = !s.isAuthenticated;
+      waitingPanel.style.display = isWaiting ? '' : 'none';
+      document.querySelector('.status-section').style.display = isWaiting ? 'none' : '';
+      document.querySelector('.timers').style.display = isWaiting ? 'none' : '';
+      document.getElementById('signOutBtn').style.display = isWaiting ? 'none' : '';
+      if (isWaiting) {
+        document.getElementById('userName').textContent = 'Action Auto Tray';
+        document.getElementById('userRole').textContent = 'Waiting for sign-in';
+        document.getElementById('avatar').textContent = 'AA';
+        document.getElementById('agentDot').className = 'agent-dot offline';
+        updateButtons(s);
+        return;
+      }
 
       // Avatar + name
       document.getElementById('avatar').textContent = initials(s.user?.fullName);
@@ -842,6 +868,10 @@
     });
 
     document.getElementById('openCrmBtn').addEventListener('click', () => {
+      window.trayAPI.openCRM();
+    });
+
+    document.getElementById('openCrmWaitingBtn').addEventListener('click', () => {
       window.trayAPI.openCRM();
     });
 

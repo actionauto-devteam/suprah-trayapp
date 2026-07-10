@@ -6,19 +6,30 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import { autoUpdater } from 'electron-updater';
 
-// Check for updates silently in the background; install automatically on quit
+// Check for updates silently in the background. This is a tray-only app that
+// is designed to stay running for days without a manual restart, so checking
+// once at launch isn't enough — it re-checks periodically below — and once an
+// update is downloaded it installs and relaunches itself rather than waiting
+// for the user to quit, since that quit may never naturally happen.
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.logger = null;
+
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // re-check every 4 hours
 
 autoUpdater.on('update-downloaded', () => {
   if (Notification.isSupported()) {
     new Notification({
       title: 'Update ready',
-      body: 'A new version of Action Auto Tray has been downloaded and will install automatically when you quit.',
+      body: 'A new version of Action Auto Tray was downloaded and will install automatically in a few seconds.',
       silent: true,
     }).show();
   }
+  // Give the notification a moment to render, then apply the update ourselves —
+  // silent install, auto-relaunch — so no manual close/reopen is needed.
+  setTimeout(() => {
+    autoUpdater.quitAndInstall(true, true);
+  }, 10_000);
 });
 // In a packaged build, .env lives in extraResources (process.resourcesPath).
 // In dev, it lives at the project root (one level above dist/).
@@ -94,7 +105,6 @@ interface AgentState {
 }
 
 let tray: Tray | null = null;
-let loginWindow: BrowserWindow | null = null;
 let statusWindow: BrowserWindow | null = null;
 let autrixWindow: BrowserWindow | null = null;
 let traySocket: TraySocket | null = null;
@@ -238,7 +248,7 @@ const buildTrayMenu = () => {
     items.push({ type: 'separator' });
     items.push({ label: 'Sign Out', click: handleLogout });
   } else {
-    items.push({ label: 'Sign In', click: showLoginWindow });
+    items.push({ label: 'Open Dashboard to Sign In', click: () => shell.openExternal(CRM_URL) });
   }
 
   items.push({ type: 'separator' });
@@ -250,32 +260,6 @@ const buildTrayMenu = () => {
 /* ─────────────────────────────────────────────────────────────────
    Windows
 ───────────────────────────────────────────────────────────────── */
-const createLoginWindow = () => {
-  if (loginWindow && !loginWindow.isDestroyed()) {
-    loginWindow.focus();
-    return;
-  }
-
-  loginWindow = new BrowserWindow({
-    width: 380,
-    height: 480,
-    resizable: false,
-    frame: false,
-    transparent: false,
-    alwaysOnTop: true,
-    center: true,
-    title: 'Action Auto — Sign In',
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-
-  loginWindow.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'login.html'));
-  loginWindow.on('closed', () => { loginWindow = null; });
-};
-
 const createStatusWindow = () => {
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.workAreaSize;
@@ -301,11 +285,6 @@ const createStatusWindow = () => {
   statusWindow.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'status.html'));
   statusWindow.on('blur', () => statusWindow?.hide());
   statusWindow.on('closed', () => { statusWindow = null; });
-};
-
-const showLoginWindow = () => {
-  if (!loginWindow || loginWindow.isDestroyed()) createLoginWindow();
-  else loginWindow.show();
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -897,27 +876,10 @@ const stopAgentServices = () => {
 
 /* ─────────────────────────────────────────────────────────────────
    Auth handlers
+   Sign-in happens on the dashboard in the browser — it silently hands a
+   token to startLocalAuthServer() / handleTrayAuth() below. There is no
+   manual login form in this app anymore.
 ───────────────────────────────────────────────────────────────── */
-interface LoginResult {
-  success: boolean;
-  error?: string;
-  user?: User;
-  token?: string;
-}
-
-const handleLogin = async (username: string, password: string): Promise<LoginResult> => {
-  try {
-    const { data } = await axios.post(`${API_URL}/api/crm/login`, { username, password }, { timeout: 15_000 });
-    if (data?.data?.token && data?.data?.user) {
-      return { success: true, token: data.data.token, user: data.data.user };
-    }
-    return { success: false, error: data?.message || 'Login failed' };
-  } catch (err: any) {
-    const msg = err?.response?.data?.message || 'Could not connect to server';
-    return { success: false, error: msg };
-  }
-};
-
 const handleLogout = async () => {
   stopAgentServices();
   activityStartMs = null;
@@ -942,35 +904,14 @@ const handleLogout = async () => {
   };
   updateTrayIcon();
   tray?.setContextMenu(buildTrayMenu());
-  statusWindow?.hide();
-  showLoginWindow();
+  broadcastState();
+  showStatusWindow();
 };
 
 /* ─────────────────────────────────────────────────────────────────
    IPC handlers
 ───────────────────────────────────────────────────────────────── */
-ipcMain.handle('auth:login', async (_e, { username, password }: { username: string; password: string }) => {
-  const result = await handleLogin(username, password);
-  if (result.success && result.user && result.token) {
-    agentState.isAuthenticated = true;
-    agentState.user = result.user;
-    agentState.isAgentOnline = true;
-    store.set('crm_token', result.token);
-    store.set('user', result.user);
-    loginWindow?.close();
-    startAgentServices(result.token);
-    broadcastState();
-  }
-  return result;
-});
-
 ipcMain.handle('auth:logout', handleLogout);
-
-ipcMain.handle('remember:get', () => store.get('rememberedUsername') as string | undefined ?? null);
-ipcMain.handle('remember:set', (_e, username: string | null) => {
-  if (username) store.set('rememberedUsername', username);
-  else store.delete('rememberedUsername');
-});
 
 ipcMain.handle('status:get', () => agentState);
 
@@ -1120,7 +1061,6 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   store.set('auth_mode', authMode);
   store.set('user', user);
   updateHeartbeatToken(token); // keep heartbeat JWT in sync when page sends a refreshed token
-  loginWindow?.close();
   if (!wasAuthenticated) startAgentServices(token);
   broadcastState();
   return true;
@@ -1215,13 +1155,11 @@ app.whenReady().then(async () => {
   tray.setContextMenu(buildTrayMenu());
 
   tray.on('click', () => {
-    if (!agentState.isAuthenticated) {
-      showLoginWindow();
-    } else {
-      if (statusWindow?.isVisible()) statusWindow.hide();
-      else showStatusWindow();
-    }
+    if (statusWindow?.isVisible()) statusWindow.hide();
+    else showStatusWindow();
   });
+
+  createStatusWindow();
 
   const savedToken = store.get('crm_token') as string | undefined;
   const savedUser = store.get('user');
@@ -1235,16 +1173,22 @@ app.whenReady().then(async () => {
     const activeToken = getAuthMode() === 'crm' ? (await tryRefreshToken(savedToken) ?? savedToken) : savedToken;
     startAgentServices(activeToken);
   } else {
-    showLoginWindow();
+    // No saved session — sign-in happens on the dashboard in the browser, which
+    // silently hands a token to startLocalAuthServer() above. Show the waiting
+    // panel so the user knows what's happening instead of a login form.
+    showStatusWindow();
   }
 
-  createStatusWindow();
-
-  // Check for updates 15s after startup so the app is fully initialized first
+  // Check for updates 15s after startup so the app is fully initialized first,
+  // then keep re-checking periodically — this app can stay running for days,
+  // so a single launch-time check isn't enough to catch a new release promptly.
   if (app.isPackaged) {
     setTimeout(() => {
       autoUpdater.checkForUpdatesAndNotify().catch(() => {});
     }, 15_000);
+    setInterval(() => {
+      autoUpdater.checkForUpdates().catch(() => {});
+    }, UPDATE_CHECK_INTERVAL_MS);
   }
 });
 
