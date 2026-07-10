@@ -30,6 +30,9 @@
   "build": {
     "appId": "com.actionauto.tray",
     "productName": "Action Auto Tray",
+    "directories": {
+      "output": "release"
+    },
     "publish": {
       "provider": "github",
       "owner": "actionauto-devteam",

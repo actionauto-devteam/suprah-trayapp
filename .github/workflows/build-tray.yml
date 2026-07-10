@@ -36,9 +36,9 @@ jobs:
         with:
           name: ActionAutoTraySetup-mac
           path: |
-            dist/*.dmg
-            dist/*.dmg.blockmap
-            dist/latest-mac.yml
+            release/*.dmg
+            release/*.dmg.blockmap
+            release/latest-mac.yml
           retention-days: 30
 
   build-windows:
@@ -70,7 +70,7 @@ jobs:
         with:
           name: ActionAutoTraySetup-windows
           path: |
-            dist/*.exe
-            dist/*.exe.blockmap
-            dist/latest.yml
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
           retention-days: 30
