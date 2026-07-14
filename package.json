@@ -64,9 +64,6 @@
     "dmg": {
       "artifactName": "ActionAutoTraySetup.dmg"
     },
-    "zip": {
-      "artifactName": "ActionAutoTraySetup-mac.zip"
-    },
     "files": [
       "dist/**/*",
       "src/renderer/**/*",
