@@ -85,6 +85,7 @@ interface User {
   fullName: string;
   username: string;
   role: string;
+  screenshotExempt?: boolean;
 }
 
 interface AgentState {
@@ -605,7 +606,10 @@ const startAgentServices = async (token: string) => {
     setSkipCaptures(true); // screenshots not yet supported for main-mode users
   } else {
     setHeartbeatPath('/api/crm/timeproof/heartbeat');
-    setSkipCaptures(false);
+    // Admin-granted per-user exemption (CrmUser.screenshotExempt) — takes
+    // effect on next login/reconnect with a fresh token, same as other
+    // account-level fields, since we don't re-fetch /api/crm/me mid-session.
+    setSkipCaptures(!!agentState.user?.screenshotExempt);
   }
 
   // Notify the user when screen capture itself fails (upload failures are queued offline)

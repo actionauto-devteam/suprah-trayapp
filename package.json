@@ -51,7 +51,8 @@
     },
     "mac": {
       "target": [
-        { "target": "dmg", "arch": ["universal"] }
+        { "target": "dmg", "arch": ["universal"] },
+        { "target": "zip", "arch": ["universal"] }
       ],
       "category": "public.app-category.productivity",
       "identity": null,
@@ -62,6 +63,9 @@
     },
     "dmg": {
       "artifactName": "ActionAutoTraySetup.dmg"
+    },
+    "zip": {
+      "artifactName": "ActionAutoTraySetup-mac.zip"
     },
     "files": [
       "dist/**/*",

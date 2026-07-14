@@ -25,19 +25,21 @@ jobs:
           echo "CRM_URL=${{ secrets.TRAY_CRM_URL }}" > .env
           echo "API_URL=${{ secrets.TRAY_API_URL }}" >> .env
 
-      - name: Build macOS DMG
+      - name: Build macOS DMG + ZIP
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npm run build:mac -- --publish always
 
-      - name: Upload DMG artifact
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ActionAutoTraySetup-mac
           path: |
             release/*.dmg
             release/*.dmg.blockmap
+            release/*.zip
+            release/*.zip.blockmap
             release/latest-mac.yml
           retention-days: 30
 
