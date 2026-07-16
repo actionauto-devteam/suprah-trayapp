@@ -21,12 +21,16 @@ export function connectSocket(
   token: string,
   onStateChange: StateChangeCallback,
   onReconnect?: () => void,
+  onUpdateCheckRequested?: () => void,
 ): void {
   if (socket?.connected) return;
   currentToken = token;
 
   socket = io(apiUrl, {
-    auth: { token: currentToken },
+    // clientType marks this connection so the backend can push events to
+    // every tray instance at once (see 'tray:check-update' below) without
+    // touching the per-user/per-org rooms web clients use.
+    auth: { token: currentToken, clientType: 'tray' },
     transports: ['websocket'],
     reconnectionDelay: 3000,
     reconnectionDelayMax: 15000,
@@ -67,6 +71,12 @@ export function connectSocket(
   socket.on('break-out', (data: { totalBreakSeconds?: number }) => {
     onStateChange({ isOnBreak: false, breakStartedAt: null, totalBreakSeconds: data?.totalBreakSeconds ?? 0 });
   });
+
+  // Backend pushes this the moment a new tray release is published — check
+  // immediately instead of waiting for the next periodic poll.
+  socket.on('tray:check-update', () => {
+    onUpdateCheckRequested?.();
+  });
 }
 
 export function disconnectSocket(): void {
@@ -86,7 +96,7 @@ export function disconnectSocket(): void {
 export function updateSocketToken(newToken: string): void {
   currentToken = newToken;
   if (!socket) return;
-  socket.auth = { token: newToken };
+  socket.auth = { token: newToken, clientType: 'tray' };
   if (socket.connected) {
     socket.disconnect();
     socket.connect();

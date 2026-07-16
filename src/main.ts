@@ -15,7 +15,12 @@ autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.logger = null;
 
-const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000; // re-check every 4 hours
+// Real-time detection now comes from the backend pushing 'tray:check-update'
+// over the socket the moment a release is published (see connectSocket call
+// in startAgentServices) — this interval is just a backstop for a tray that
+// happened to be offline/disconnected when that push fired, so it doesn't
+// need to be aggressive and doesn't add to GitHub API rate-limit pressure.
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // backstop: re-check every 30 minutes
 
 autoUpdater.on('update-downloaded', () => {
   if (Notification.isSupported()) {
@@ -26,8 +31,15 @@ autoUpdater.on('update-downloaded', () => {
     }).show();
   }
   // Give the notification a moment to render, then apply the update ourselves —
-  // silent install, auto-relaunch — so no manual close/reopen is needed.
-  setTimeout(() => {
+  // silent install, auto-relaunch — so no manual close/reopen is needed, even
+  // while the user is actively clocked in. Flush whatever's been tracked since
+  // the last checkpoint FIRST — quitAndInstall terminates the process, and
+  // without this the in-memory-only active segment would be silently lost,
+  // same failure mode as an unexpected crash.
+  setTimeout(async () => {
+    if (activityStartMs !== null) {
+      await commitActiveSegment(new Date());
+    }
     autoUpdater.quitAndInstall(true, true);
   }, 10_000);
 });
@@ -619,11 +631,19 @@ const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
  * auto-update relaunch, forced quit) loses the entire stretch instead of
  * just the last few minutes since the last checkpoint.
  */
-const commitActiveSegment = async (endAt: Date): Promise<void> => {
-  if (activityStartMs === null) return;
+/**
+ * Returns true if the segment was committed (or there was nothing to commit /
+ * it was too short to matter) — false only when the POST itself failed. Callers
+ * that roll activityStartMs forward MUST check this return value: rolling
+ * forward unconditionally after a failed commit silently discards that chunk
+ * of time forever (the next checkpoint would start counting from the new,
+ * later point instead of retrying the un-committed duration).
+ */
+const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
+  if (activityStartMs === null) return true;
   const currentToken = store.get('crm_token') as string | undefined;
   const durationMs = endAt.getTime() - activityStartMs;
-  if (!currentToken || durationMs < 30_000) return;
+  if (!currentToken || durationMs < 30_000) return true;
   try {
     await axios.post(
       `${API_URL}${getActivityIntervalUrl()}`,
@@ -632,7 +652,10 @@ const commitActiveSegment = async (endAt: Date): Promise<void> => {
     );
     todayTotalActiveMs += durationMs;
     agentState.todayTotalActiveMs = todayTotalActiveMs;
-  } catch { }
+    return true;
+  } catch {
+    return false;
+  }
 };
 
 const startAgentServices = async (token: string) => {
@@ -744,9 +767,17 @@ const startAgentServices = async (token: string) => {
   activityCheckpointIntervalId = setInterval(async () => {
     if (!agentState.isOnShift || agentState.isOnBreak || agentState.isIdle || activityStartMs === null) return;
     const now = new Date();
-    await commitActiveSegment(now);
-    activityStartMs = now.getTime();
-    agentState.activityStartMs = activityStartMs;
+    const committed = await commitActiveSegment(now);
+    // Only roll the start point forward if the commit actually succeeded —
+    // otherwise this chunk is silently dropped (activityStartMs would move to
+    // "now" while todayTotalActiveMs never received the duration), and every
+    // subsequent checkpoint keeps re-losing time the same way. Leaving
+    // activityStartMs untouched means the next tick retries the FULL
+    // accumulated duration instead.
+    if (committed) {
+      activityStartMs = now.getTime();
+      agentState.activityStartMs = activityStartMs;
+    }
   }, ACTIVITY_CHECKPOINT_MS);
 
   // Check every 30s if break has exceeded 1 hour — notify user once per break session
@@ -892,6 +923,9 @@ const startAgentServices = async (token: string) => {
       flushQueue(API_URL, token).catch(() => {});
     },
     () => { syncShiftState(token); },
+    () => {
+      if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
+    },
   );
 
   // Sync state. syncShiftState already handles auto-resume tracking (gated to
@@ -1274,10 +1308,15 @@ app.whenReady().then(async () => {
     }
     if (activityStartMs !== null) {
       const checkpointAt = new Date();
-      commitActiveSegment(checkpointAt).then(() => {
-        activityStartMs = checkpointAt.getTime();
-        agentState.activityStartMs = activityStartMs;
-      }).catch(() => {});
+      // commitActiveSegment never rejects (it swallows its own POST errors),
+      // so .then() alone can't distinguish success from failure — check the
+      // resolved boolean, same reasoning as the periodic checkpoint above.
+      commitActiveSegment(checkpointAt).then((committed) => {
+        if (committed) {
+          activityStartMs = checkpointAt.getTime();
+          agentState.activityStartMs = activityStartMs;
+        }
+      });
     }
   };
   powerMonitor.on('suspend', () => handleSystemSuspendOrShutdown('went to sleep'));

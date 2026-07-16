@@ -76,3 +76,12 @@ jobs:
             release/*.exe.blockmap
             release/latest.yml
           retention-days: 30
+
+  notify-tray-clients:
+    needs: [build-mac, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Push instant update-check to running tray-apps
+        run: |
+          curl -sf -X POST "${{ secrets.TRAY_API_URL }}/api/internal/tray-update-available" \
+            -H "x-internal-secret: ${{ secrets.TRAY_UPDATE_BROADCAST_SECRET }}"
