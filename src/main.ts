@@ -37,7 +37,7 @@ const envPath = app.isPackaged
   ? path.join(process.resourcesPath, '.env')
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
-import { connectSocket, disconnectSocket } from './socket';
+import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
 import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures } from './screenshot';
@@ -112,7 +112,20 @@ let traySocket: TraySocket | null = null;
 
 let breakNotifyIntervalId: ReturnType<typeof setInterval> | null = null;
 let resyncIntervalId: ReturnType<typeof setInterval> | null = null;
+let autoClockoutCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let breakExceededNotified = false;
+let autoClockoutTriggeredForThisIdleStretch = false;
+
+// Rendered hours (net of breaks) a shift must already have before either
+// auto-clock-out trigger below (idle timeout or sleep/shutdown) becomes
+// active — a shift that hasn't reached this yet is left alone even if the
+// machine goes idle or to sleep.
+const AUTO_CLOCKOUT_RENDERED_HOURS_MS = 8 * 60 * 60 * 1000;
+const AUTO_CLOCKOUT_IDLE_MS = 30 * 60 * 1000;
+
+/** Rendered (active, break-excluded) milliseconds for the current shift so far. */
+const getRenderedMsSoFar = (): number =>
+  todayTotalActiveMs + (activityStartMs !== null ? Date.now() - activityStartMs : 0);
 
 // Activity-based time tracking (idle-aware)
 let activityStartMs: number | null = null;  // when current active period began (local clock)
@@ -594,6 +607,33 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
 };
 
 let tokenRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
+let activityCheckpointIntervalId: ReturnType<typeof setInterval> | null = null;
+const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
+
+/**
+ * Commits the current active segment (activityStartMs → endAt) as a saved
+ * ActivityInterval and folds its duration into todayTotalActiveMs. Used both
+ * when the user goes idle AND by the periodic checkpoint below — without a
+ * periodic checkpoint, a long continuous active stretch lives only in this
+ * process's memory until it ends, so an unexpected tray restart (crash,
+ * auto-update relaunch, forced quit) loses the entire stretch instead of
+ * just the last few minutes since the last checkpoint.
+ */
+const commitActiveSegment = async (endAt: Date): Promise<void> => {
+  if (activityStartMs === null) return;
+  const currentToken = store.get('crm_token') as string | undefined;
+  const durationMs = endAt.getTime() - activityStartMs;
+  if (!currentToken || durationMs < 30_000) return;
+  try {
+    await axios.post(
+      `${API_URL}${getActivityIntervalUrl()}`,
+      { startAt: new Date(activityStartMs).toISOString(), endAt: endAt.toISOString() },
+      { headers: { Authorization: `Bearer ${currentToken}` }, timeout: 10_000 }
+    );
+    todayTotalActiveMs += durationMs;
+    agentState.todayTotalActiveMs = todayTotalActiveMs;
+  } catch { }
+};
 
 const startAgentServices = async (token: string) => {
   const SCREENSHOT_INTERVAL_MS = 10 * 60 * 1000;
@@ -635,7 +675,14 @@ const startAgentServices = async (token: string) => {
     const refreshed = await tryRefreshToken(current);
     if (!refreshed) {
       handleLogout();
+      return;
     }
+    // Propagate the renewed JWT everywhere it's used — previously only the
+    // store got the new token, so heartbeat and the socket kept using the
+    // old one until it eventually expired, silently breaking real-time sync
+    // and (once the old token expired outright) heartbeats too.
+    updateHeartbeatToken(refreshed);
+    updateSocketToken(refreshed);
   }, TOKEN_REFRESH_INTERVAL_MS) : null;
 
   startIdleMonitor(async (isIdle) => {
@@ -650,21 +697,9 @@ const startAgentServices = async (token: string) => {
       // Truncate endAt to when the user last had input rather than using Date.now(),
       // which would include sleep time if the computer just woke from suspension.
       if (wasTracking && activityStartMs !== null) {
-        const currentToken = store.get('crm_token') as string | undefined;
         const idleSec = powerMonitor.getSystemIdleTime();
         const endAt = new Date(Date.now() - idleSec * 1000);
-        const durationMs = endAt.getTime() - activityStartMs;
-        if (currentToken && durationMs >= 30_000) {
-          try {
-            await axios.post(
-              `${API_URL}${getActivityIntervalUrl()}`,
-              { startAt: new Date(activityStartMs).toISOString(), endAt: endAt.toISOString() },
-              { headers: { Authorization: `Bearer ${currentToken}` }, timeout: 10_000 }
-            );
-            todayTotalActiveMs += durationMs;
-            agentState.todayTotalActiveMs = todayTotalActiveMs;
-          } catch { }
-        }
+        await commitActiveSegment(endAt);
         activityStartMs = null;
         agentState.activityStartMs = null;
       }
@@ -700,6 +735,20 @@ const startAgentServices = async (token: string) => {
     broadcastState();
   });
 
+  // Periodic checkpoint: while actively tracking, commit the segment so far
+  // and roll the start point forward every 10 minutes. Without this, a long
+  // continuous active stretch (no idle gaps) is only ever committed when it
+  // ENDS — an unexpected tray restart mid-stretch (crash, auto-update
+  // relaunch, killed on sleep) loses everything since the last idle
+  // transition instead of just the last few minutes.
+  activityCheckpointIntervalId = setInterval(async () => {
+    if (!agentState.isOnShift || agentState.isOnBreak || agentState.isIdle || activityStartMs === null) return;
+    const now = new Date();
+    await commitActiveSegment(now);
+    activityStartMs = now.getTime();
+    agentState.activityStartMs = activityStartMs;
+  }, ACTIVITY_CHECKPOINT_MS);
+
   // Check every 30s if break has exceeded 1 hour — notify user once per break session
   breakExceededNotified = false;
   breakNotifyIntervalId = setInterval(() => {
@@ -718,6 +767,30 @@ const startAgentServices = async (token: string) => {
       }).show();
     }
   }, 30_000);
+
+  // Auto clock-out: once a shift has already rendered 8+ hours, 30 continuous
+  // minutes of no keyboard/mouse input is treated as "done and forgot to end
+  // shift" rather than a normal break. Checked every 60s against the OS's own
+  // idle-time counter (not our 30s poll cadence) so it fires close to the
+  // 30-minute mark regardless of when the last check happened to run.
+  autoClockoutTriggeredForThisIdleStretch = false;
+  autoClockoutCheckIntervalId = setInterval(async () => {
+    if (!agentState.isOnShift || agentState.isOnBreak) { autoClockoutTriggeredForThisIdleStretch = false; return; }
+    const idleMs = powerMonitor.getSystemIdleTime() * 1000;
+    if (idleMs < AUTO_CLOCKOUT_IDLE_MS) { autoClockoutTriggeredForThisIdleStretch = false; return; }
+    if (autoClockoutTriggeredForThisIdleStretch) return;
+    if (getRenderedMsSoFar() < AUTO_CLOCKOUT_RENDERED_HOURS_MS) return; // hasn't earned the 8h yet — leave shift open
+
+    autoClockoutTriggeredForThisIdleStretch = true;
+    const result = await performClockAction('time-out', 'Auto clock-out — 30+ minutes without activity after rendering 8+ hours');
+    if (result.success && Notification.isSupported()) {
+      new Notification({
+        title: 'Shift ended automatically',
+        body: 'You were inactive for 30+ minutes after completing 8 hours — your shift was clocked out. Click Resume if you\'re still working.',
+        silent: false,
+      }).show();
+    }
+  }, 60_000);
 
   startHeartbeat(API_URL, token, () => {
     const isOnBreak = agentState.isOnBreak;
@@ -864,7 +937,16 @@ const stopAgentServices = () => {
     clearInterval(resyncIntervalId);
     resyncIntervalId = null;
   }
+  if (autoClockoutCheckIntervalId) {
+    clearInterval(autoClockoutCheckIntervalId);
+    autoClockoutCheckIntervalId = null;
+  }
+  if (activityCheckpointIntervalId) {
+    clearInterval(activityCheckpointIntervalId);
+    activityCheckpointIntervalId = null;
+  }
   breakExceededNotified = false;
+  autoClockoutTriggeredForThisIdleStretch = false;
   stopIdleMonitor();
   stopHeartbeat();
   stopScreenshots();
@@ -936,7 +1018,7 @@ ipcMain.handle('shift:check-resumable', async () => {
   }
 });
 
-ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
+const performClockAction = async (type: string, note?: string): Promise<{ success: boolean; error?: string }> => {
   const token = store.get('crm_token') as string | undefined;
   if (!token) return { success: false, error: 'Not authenticated' };
   try {
@@ -964,7 +1046,15 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
     }).catch(() => {});
     return { success: true };
   } catch (err: any) {
-    const msg = err?.response?.data?.message || 'Action failed';
+    let msg = err?.response?.data?.message || 'Action failed';
+
+    // There is no manual login form in the tray anymore — "log in again" is
+    // stale guidance. The actual recovery path is: the website hands the tray
+    // a fresh token via the "Tray App Required" reconnect flow, so point the
+    // user there instead of telling them to do something that no longer exists.
+    if (/session expired/i.test(msg)) {
+      msg = 'Session expired. Click "Open CRM" below, then try Start Shift again on the website to reconnect.';
+    }
 
     // Resume path: backend already has an open clock-in (carried over from a
     // forgotten or older session). The tray no longer auto-tracks on launch for
@@ -987,7 +1077,9 @@ ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => {
     }
     return { success: false, error: msg };
   }
-});
+};
+
+ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => performClockAction(type, note));
 
 /* ─────────────────────────────────────────────────────────────────
    Autrix AI IPC handlers
@@ -1065,7 +1157,12 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   store.set('auth_mode', authMode);
   store.set('user', user);
   updateHeartbeatToken(token); // keep heartbeat JWT in sync when page sends a refreshed token
-  if (!wasAuthenticated) startAgentServices(token);
+  // startAgentServices (and its connectSocket call) only runs on the FIRST
+  // auth — a refreshed token arriving while already authenticated used to
+  // never reach the socket, leaving it running on the original (eventually
+  // stale) token until the app restarted.
+  if (wasAuthenticated) updateSocketToken(token);
+  else startAgentServices(token);
   broadcastState();
   return true;
 };
@@ -1082,6 +1179,10 @@ const startLocalAuthServer = () => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // Chrome Private Network Access: grants the silent preflight so the
+    // CRM web page (public HTTPS origin) can push the auth token to this
+    // loopback server without a permission prompt or hard block.
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
 
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
     if (req.method !== 'POST' || req.url !== '/auth') { res.writeHead(404); res.end(); return; }
@@ -1153,6 +1254,34 @@ app.whenReady().then(async () => {
   try { autoLauncher.enable(); } catch { } // register with auto-launch as fallback
   registerRecordingIpcHandlers();
   startLocalAuthServer();
+
+  // Auto clock-out on sleep/shutdown — only once the shift has already
+  // rendered 8+ hours (same rule as the idle-based trigger above). Electron
+  // gives no guaranteed grace period before the OS actually suspends/powers
+  // off, so this is best-effort: if it doesn't land in time (abrupt power
+  // loss, OS doesn't wait), the backend's own stale-shift safety net closes
+  // the shift later using the last known activity instead.
+  //
+  // Below 8h rendered, we don't end the shift, but we DO flush a checkpoint
+  // of whatever's been tracked so far — otherwise the in-memory-only active
+  // segment rides through the sleep/shutdown unsaved, and if the process
+  // doesn't survive to resume normally, that time is gone for good.
+  const handleSystemSuspendOrShutdown = (reason: string) => {
+    if (!agentState.isOnShift || agentState.isOnBreak) return;
+    if (getRenderedMsSoFar() >= AUTO_CLOCKOUT_RENDERED_HOURS_MS) {
+      performClockAction('time-out', `Auto clock-out — device ${reason} after rendering 8+ hours`).catch(() => {});
+      return;
+    }
+    if (activityStartMs !== null) {
+      const checkpointAt = new Date();
+      commitActiveSegment(checkpointAt).then(() => {
+        activityStartMs = checkpointAt.getTime();
+        agentState.activityStartMs = activityStartMs;
+      }).catch(() => {});
+    }
+  };
+  powerMonitor.on('suspend', () => handleSystemSuspendOrShutdown('went to sleep'));
+  powerMonitor.on('shutdown', () => handleSystemSuspendOrShutdown('shut down'));
 
   tray = new Tray(getTrayIcon());
   tray.setToolTip('Action Auto Tray');

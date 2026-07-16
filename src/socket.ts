@@ -14,6 +14,7 @@ export interface ShiftState {
 type StateChangeCallback = (state: Partial<ShiftState>) => void;
 
 let socket: Socket | null = null;
+let currentToken = '';
 
 export function connectSocket(
   apiUrl: string,
@@ -22,9 +23,10 @@ export function connectSocket(
   onReconnect?: () => void,
 ): void {
   if (socket?.connected) return;
+  currentToken = token;
 
   socket = io(apiUrl, {
-    auth: { token },
+    auth: { token: currentToken },
     transports: ['websocket'],
     reconnectionDelay: 3000,
     reconnectionDelayMax: 15000,
@@ -70,6 +72,25 @@ export function connectSocket(
 export function disconnectSocket(): void {
   socket?.disconnect();
   socket = null;
+  currentToken = '';
+}
+
+/**
+ * Keep the socket's JWT in sync when the token is refreshed (proactive
+ * 10-hour renewal, or a fresh token pushed from the web after re-auth).
+ * The socket.io client only re-reads `socket.auth` on a (re)connection
+ * attempt, so a stale token here silently breaks reconnection the next
+ * time the transport drops — heartbeat keeps working (it reads its own
+ * token per-request) while real-time break/time-in/out sync quietly stops.
+ */
+export function updateSocketToken(newToken: string): void {
+  currentToken = newToken;
+  if (!socket) return;
+  socket.auth = { token: newToken };
+  if (socket.connected) {
+    socket.disconnect();
+    socket.connect();
+  }
 }
 
 export function isSocketConnected(): boolean {
