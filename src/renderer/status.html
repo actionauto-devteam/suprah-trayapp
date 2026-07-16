@@ -604,11 +604,16 @@
       return name.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
     };
 
-    // Activity-based work timer: counts only completed intervals + live interval
+    // Work timer: driven by the authoritative wall-clock baseline (same
+    // TimeLog-based figure behind the CRM's Today card), not the
+    // activityStartMs/todayTotalActiveMs pair — that pair repeatedly reset or
+    // froze after a failed checkpoint, stale heartbeat, or idle-detection
+    // flap. wallClockBaseMs is fetched fresh every sync; wallClockBaseAt just
+    // marks when, so the client ticks the gap in between.
     const updateWorkTimer = () => {
-      const prevMs = state.todayTotalActiveMs || 0;
-      const liveMs = state.activityStartMs
-        ? Math.max(0, Date.now() - state.activityStartMs)
+      const prevMs = state.wallClockBaseMs || 0;
+      const liveMs = state.wallClockBaseAt
+        ? Math.max(0, Date.now() - state.wallClockBaseAt)
         : 0;
       document.getElementById('shiftTimer').textContent = fmt(Math.floor((prevMs + liveMs) / 1000));
     };

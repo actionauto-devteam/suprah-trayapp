@@ -115,6 +115,12 @@ interface AgentState {
   // Activity-based tracking (idle-aware timer)
   activityStartMs: number | null;
   todayTotalActiveMs: number;
+  // Authoritative rendered-hours baseline — same wall-clock (TimeLog-based)
+  // figure that powers the CRM's Today card / calendar, which never suffers
+  // the "resets to zero" bug the activityStartMs-based timer above is prone
+  // to. The renderer should display THIS, ticking from wallClockBaseAt.
+  wallClockBaseMs: number;
+  wallClockBaseAt: number | null;
 }
 
 let tray: Tray | null = null;
@@ -135,13 +141,26 @@ let autoClockoutTriggeredForThisIdleStretch = false;
 const AUTO_CLOCKOUT_RENDERED_HOURS_MS = 8 * 60 * 60 * 1000;
 const AUTO_CLOCKOUT_IDLE_MS = 30 * 60 * 1000;
 
-/** Rendered (active, break-excluded) milliseconds for the current shift so far. */
+/**
+ * Rendered (active, break-excluded) milliseconds for the current shift so
+ * far — uses the authoritative wall-clock baseline (same figure backing the
+ * CRM's Today card), not the activityStartMs/todayTotalActiveMs pair, since
+ * auto-clockout decisions below depend on this crossing the 8h threshold
+ * correctly and that pair has repeatedly been found to under-report after
+ * a failed checkpoint, stale heartbeat, or idle-detection flap.
+ */
 const getRenderedMsSoFar = (): number =>
-  todayTotalActiveMs + (activityStartMs !== null ? Date.now() - activityStartMs : 0);
+  wallClockBaseMs + (wallClockBaseAt !== null ? Date.now() - wallClockBaseAt : 0);
 
-// Activity-based time tracking (idle-aware)
+// Activity-based time tracking (idle-aware) — still used for ActivityInterval
+// commits (idle log / monitoring) and screenshot gating, just no longer as
+// the basis for the displayed timer or auto-clockout hour-threshold checks.
 let activityStartMs: number | null = null;  // when current active period began (local clock)
 let todayTotalActiveMs: number = 0;         // sum of completed active interval durations
+
+// Authoritative wall-clock baseline — see AgentState.wallClockBaseMs/wallClockBaseAt.
+let wallClockBaseMs: number = 0;
+let wallClockBaseAt: number | null = null;
 
 let agentState: AgentState = {
   isAuthenticated: false,
@@ -157,6 +176,8 @@ let agentState: AgentState = {
   todayTotalWorkedSeconds: 0,
   activityStartMs: null,
   todayTotalActiveMs: 0,
+  wallClockBaseMs: 0,
+  wallClockBaseAt: null,
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -501,6 +522,14 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       agentState.breakStartedAt         = s.isOnShift ? (s.breakStartedAt ?? null) : null;
       agentState.totalBreakSeconds      = s.isOnShift ? (s.totalBreakSeconds ?? 0) : 0;
       agentState.todayTotalWorkedSeconds = s.todayTotalWorkedSeconds ?? 0;
+      // Authoritative wall-clock baseline for display + auto-clockout hour
+      // checks (see getRenderedMsSoFar) — always correct, TimeLog-based, so
+      // it never suffers the reset/freeze bugs the activityStartMs pair below
+      // has repeatedly hit.
+      wallClockBaseMs = (s.wallClockRenderedSeconds ?? 0) * 1000;
+      wallClockBaseAt = (s.isOnShift && !s.isOnBreak) ? Date.now() : null;
+      agentState.wallClockBaseMs = wallClockBaseMs;
+      agentState.wallClockBaseAt = wallClockBaseAt;
       // Activity-based tracking: pull the authoritative completed-interval total from the server.
       // We do NOT restore activityStartMs from currentIntervalStartAt because that value could
       // be stale (written before a restart) and would inflate the timer with offline time.
@@ -857,6 +886,14 @@ const startAgentServices = async (token: string) => {
       agentState = { ...agentState, ...partial };
       agentState.isAgentOnline = true;
 
+      // Toggle the wall-clock ticking flag immediately on transitions instead
+      // of waiting for the next 60s syncShiftState poll — wallClockBaseMs
+      // itself (the accumulated figure) still only refreshes on that poll,
+      // so a resumed session may briefly over/undercount until the next one,
+      // same self-correcting tolerance as the rest of this mechanism.
+      wallClockBaseAt = (agentState.isOnShift && !agentState.isOnBreak) ? Date.now() : null;
+      agentState.wallClockBaseAt = wallClockBaseAt;
+
       // Capture whether shift/break state changed BEFORE tracking transitions so we
       // can call pingHeartbeat() AFTER activityStartMs is correctly set/cleared.
       const shiftStateChanged = agentState.isOnBreak !== prevIsOnBreak || agentState.isOnShift !== prevIsOnShift;
@@ -1004,6 +1041,8 @@ const handleLogout = async () => {
   stopAgentServices();
   activityStartMs = null;
   todayTotalActiveMs = 0;
+  wallClockBaseMs = 0;
+  wallClockBaseAt = null;
   store.delete('crm_token');
   store.delete('auth_mode');
   store.delete('user');
@@ -1021,6 +1060,8 @@ const handleLogout = async () => {
     todayTotalWorkedSeconds: 0,
     activityStartMs: null,
     todayTotalActiveMs: 0,
+    wallClockBaseMs: 0,
+    wallClockBaseAt: null,
   };
   updateTrayIcon();
   tray?.setContextMenu(buildTrayMenu());
