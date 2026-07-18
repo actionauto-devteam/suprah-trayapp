@@ -809,7 +809,12 @@ const startAgentServices = async (token: string) => {
     }
   }, ACTIVITY_CHECKPOINT_MS);
 
-  // Check every 30s if break has exceeded 1 hour — notify user once per break session
+  // Check every 30s if break has run 4 minutes past the 1h limit — warn the
+  // user once per break session, a minute before the backend escalates to
+  // their admin/manager at the 5-minute mark (see BREAK_ADMIN_NOTIFY_SECONDS
+  // in crmTimeproof.controller.ts) — a short heads-up to wrap up before
+  // their admin gets involved, not a "your admin already knows" message.
+  const BREAK_WARNING_SECONDS = 60 * 60 + 4 * 60;
   breakExceededNotified = false;
   breakNotifyIntervalId = setInterval(() => {
     if (!agentState.isOnBreak || !agentState.breakStartedAt) {
@@ -818,11 +823,11 @@ const startAgentServices = async (token: string) => {
     }
     if (breakExceededNotified) return;
     const breakSecs = Math.floor((Date.now() - new Date(agentState.breakStartedAt).getTime()) / 1000);
-    if (breakSecs >= 3600 && Notification.isSupported()) {
+    if (breakSecs >= BREAK_WARNING_SECONDS && Notification.isSupported()) {
       breakExceededNotified = true;
       new Notification({
         title: 'Break time exceeded',
-        body: 'You have exceeded your break time. Your admin has been notified.',
+        body: "You've gone over your 1-hour break. Please wrap up soon — your admin will be notified shortly if it continues.",
         silent: false,
       }).show();
     }
