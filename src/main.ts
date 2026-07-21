@@ -809,12 +809,12 @@ const startAgentServices = async (token: string) => {
     }
   }, ACTIVITY_CHECKPOINT_MS);
 
-  // Check every 30s if break has run 4 minutes past the 1h limit — warn the
-  // user once per break session, a minute before the backend escalates to
+  // Check every 30s if break has run 1 minute past the 1h limit — warn the
+  // user once per break session, 4 minutes before the backend escalates to
   // their admin/manager at the 5-minute mark (see BREAK_ADMIN_NOTIFY_SECONDS
   // in crmTimeproof.controller.ts) — a short heads-up to wrap up before
   // their admin gets involved, not a "your admin already knows" message.
-  const BREAK_WARNING_SECONDS = 60 * 60 + 4 * 60;
+  const BREAK_WARNING_SECONDS = 60 * 60 + 1 * 60;
   breakExceededNotified = false;
   breakNotifyIntervalId = setInterval(() => {
     if (!agentState.isOnBreak || !agentState.breakStartedAt) {
