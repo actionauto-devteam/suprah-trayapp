@@ -1,4 +1,4 @@
-import { desktopCapturer, app, nativeImage } from 'electron';
+import { desktopCapturer, screen, app, nativeImage } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
@@ -16,9 +16,16 @@ let captureFailedCb: (() => void) | null = null;
 let lastCaptureFailedAt = 0;
 let getIsOnBreak: () => boolean = () => false;
 let skipCaptures = false;
+// Web Dev department only (see isMainMonitorOnlyDept on the backend) — set
+// once per login via main.ts based on the logged-in user's department.
+let mainMonitorOnly = false;
 
 export function setSkipCaptures(skip: boolean): void {
   skipCaptures = skip;
+}
+
+export function setMainMonitorOnly(value: boolean): void {
+  mainMonitorOnly = value;
 }
 
 export function setCaptureFailedCallback(cb: () => void): void {
@@ -47,6 +54,19 @@ async function captureAllScreens(): Promise<Buffer | null> {
   });
 
   if (sources.length === 0) return null;
+
+  // Web Dev department only: capture the primary/main display alone, ignore
+  // any secondary monitors entirely — set via setMainMonitorOnly() based on
+  // the logged-in user's department (see isMainMonitorOnlyDept on the
+  // backend). display_id lines up with screen.getPrimaryDisplay().id on
+  // Windows/macOS; if it ever doesn't match anything (platform quirk), fall
+  // through to the normal multi-monitor path rather than capturing nothing.
+  if (mainMonitorOnly && sources.length > 1) {
+    const primaryId = screen.getPrimaryDisplay().id.toString();
+    const primarySource = sources.find(s => s.display_id === primaryId);
+    if (primarySource) return primarySource.thumbnail.toJPEG(80);
+  }
+
   if (sources.length === 1) return sources[0].thumbnail.toJPEG(80);
 
   // Filter out any zero-size thumbnails (disconnected/mirrored displays)

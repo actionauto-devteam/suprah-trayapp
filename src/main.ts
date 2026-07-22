@@ -52,7 +52,7 @@ dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
 import { startIdleMonitor, stopIdleMonitor } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures } from './screenshot';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
 import { startRecording, stopRecording, getRecordingStatus, registerRecordingIpcHandlers, destroyRecorderWindow } from './recording';
@@ -98,6 +98,7 @@ interface User {
   username: string;
   role: string;
   screenshotExempt?: boolean;
+  mainMonitorOnly?: boolean;
 }
 
 interface AgentState {
@@ -1233,6 +1234,7 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   agentState.isAuthenticated = true;
   agentState.user = user;
   agentState.isAgentOnline = true;
+  setMainMonitorOnly(!!user.mainMonitorOnly);
   store.set('crm_token', token);
   store.set('auth_mode', authMode);
   store.set('user', user);
