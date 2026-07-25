@@ -50,7 +50,7 @@ const envPath = app.isPackaged
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
-import { startIdleMonitor, stopIdleMonitor } from './idle';
+import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
 import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly } from './screenshot';
 import { flushQueue } from './offline-queue';
@@ -99,6 +99,7 @@ interface User {
   role: string;
   screenshotExempt?: boolean;
   mainMonitorOnly?: boolean;
+  idleDetectionExempt?: boolean;
 }
 
 interface AgentState {
@@ -1235,6 +1236,7 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   agentState.user = user;
   agentState.isAgentOnline = true;
   setMainMonitorOnly(!!user.mainMonitorOnly);
+  setIdleDetectionExempt(!!user.idleDetectionExempt);
   store.set('crm_token', token);
   store.set('auth_mode', authMode);
   store.set('user', user);

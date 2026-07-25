@@ -47,10 +47,16 @@ const toShiftDate = () => {
  * Captures all connected monitors and stitches them horizontally into a single JPEG.
  * Single-monitor setups follow the same path as before (no stitching overhead).
  */
+// Large enough that real-world displays (up to 4K) return their thumbnail at
+// native resolution rather than being downscaled to fit — Electron only
+// shrinks to fit the requested box, never upscales, so this is what makes
+// the resolution-matching fallback below actually work.
+const MAIN_MONITOR_THUMBNAIL_SIZE = { width: 3840, height: 2160 };
+
 async function captureAllScreens(): Promise<Buffer | null> {
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
-    thumbnailSize: { width: 1920, height: 1080 },
+    thumbnailSize: mainMonitorOnly ? MAIN_MONITOR_THUMBNAIL_SIZE : { width: 1920, height: 1080 },
   });
 
   if (sources.length === 0) return null;
@@ -58,13 +64,41 @@ async function captureAllScreens(): Promise<Buffer | null> {
   // Web Dev department only: capture the primary/main display alone, ignore
   // any secondary monitors entirely — set via setMainMonitorOnly() based on
   // the logged-in user's department (see isMainMonitorOnlyDept on the
-  // backend). display_id lines up with screen.getPrimaryDisplay().id on
-  // Windows/macOS; if it ever doesn't match anything (platform quirk), fall
-  // through to the normal multi-monitor path rather than capturing nothing.
+  // backend).
   if (mainMonitorOnly && sources.length > 1) {
-    const primaryId = screen.getPrimaryDisplay().id.toString();
-    const primarySource = sources.find(s => s.display_id === primaryId);
-    if (primarySource) return primarySource.thumbnail.toJPEG(80);
+    const primary = screen.getPrimaryDisplay();
+
+    // Height omitted (left to auto-scale) on both resize calls below —
+    // giving resize() both width AND height stretches the image to exactly
+    // fit, distorting anything that isn't 16:9 (ultrawide, 4:3, portrait
+    // monitors, etc). Width-only preserves the source's real aspect ratio.
+    const toOutputJpeg = (thumbnail: Electron.NativeImage) =>
+      thumbnail.resize({ width: 1920 }).toJPEG(80);
+
+    // Strategy 1: display_id lines up with screen.getPrimaryDisplay().id on
+    // most systems — cheap and exact when it works.
+    const primaryId = primary.id.toString();
+    const byId = sources.find(s => s.display_id === primaryId);
+    if (byId) return toOutputJpeg(byId.thumbnail);
+
+    // Strategy 2: display_id isn't populated on some Windows configs (known
+    // Electron limitation — comes back empty or in a format that doesn't
+    // match Display.id at all). Fall back to matching the primary display's
+    // actual pixel resolution (DIP size × scaleFactor) against each source's
+    // thumbnail size, since the thumbnail box above is large enough that a
+    // real monitor's thumbnail comes back at its native resolution instead
+    // of being scaled down.
+    const primaryPixelWidth = Math.round(primary.size.width * primary.scaleFactor);
+    const primaryPixelHeight = Math.round(primary.size.height * primary.scaleFactor);
+    const byResolution = sources.find(s => {
+      const size = s.thumbnail.getSize();
+      return size.width === primaryPixelWidth && size.height === primaryPixelHeight;
+    });
+    if (byResolution) return toOutputJpeg(byResolution.thumbnail);
+
+    // Both strategies failed to identify which source is the primary
+    // display — fall through to the normal multi-monitor path rather than
+    // capturing nothing or guessing wrong.
   }
 
   if (sources.length === 1) return sources[0].thumbnail.toJPEG(80);
