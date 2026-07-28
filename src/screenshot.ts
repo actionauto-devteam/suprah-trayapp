@@ -47,19 +47,47 @@ const toShiftDate = () => {
  * Captures all connected monitors and stitches them horizontally into a single JPEG.
  * Single-monitor setups follow the same path as before (no stitching overhead).
  */
-// Large enough that real-world displays (up to 4K) return their thumbnail at
-// native resolution rather than being downscaled to fit — Electron only
-// shrinks to fit the requested box, never upscales, so this is what makes
-// the resolution-matching fallback below actually work.
-const MAIN_MONITOR_THUMBNAIL_SIZE = { width: 3840, height: 2160 };
+const DEFAULT_THUMBNAIL_SIZE = { width: 1920, height: 1080 };
+
+// Only needed when there are 2+ displays and mainMonitorOnly must disambiguate
+// which one is primary (see Strategy 2 below). Sized to the largest connected
+// display's actual pixel resolution — instead of a blanket fixed 3840x2160 —
+// so a machine with ordinary 1080p/1440p monitors isn't paying 4K-buffer
+// memory/CPU cost on every capture. Must be at least the native size or
+// Electron downscales the thumbnail, which breaks the resolution match.
+function getMainMonitorThumbnailSize(): { width: number; height: number } {
+  const displays = screen.getAllDisplays();
+  let maxW = 0;
+  let maxH = 0;
+  for (const d of displays) {
+    maxW = Math.max(maxW, Math.round(d.size.width * d.scaleFactor));
+    maxH = Math.max(maxH, Math.round(d.size.height * d.scaleFactor));
+  }
+  return { width: maxW || DEFAULT_THUMBNAIL_SIZE.width, height: maxH || DEFAULT_THUMBNAIL_SIZE.height };
+}
 
 async function captureAllScreens(): Promise<Buffer | null> {
+  // The oversized thumbnail request is only ever needed to disambiguate
+  // between 2+ monitors (Strategy 2 below). Gating it on mainMonitorOnly
+  // alone (a department-wide flag) meant a single-monitor Web Dev user paid
+  // the full 4K-buffer cost on every single capture, all shift long, for a
+  // disambiguation they never needed — the leading suspect behind
+  // desktopCapturer silently starting to return zero sources after enough
+  // repeated oversized requests in one long-running session.
+  const needsMainMonitorDisambiguation = mainMonitorOnly && screen.getAllDisplays().length > 1;
   const sources = await desktopCapturer.getSources({
     types: ['screen'],
-    thumbnailSize: mainMonitorOnly ? MAIN_MONITOR_THUMBNAIL_SIZE : { width: 1920, height: 1080 },
+    thumbnailSize: needsMainMonitorDisambiguation ? getMainMonitorThumbnailSize() : DEFAULT_THUMBNAIL_SIZE,
   });
 
-  if (sources.length === 0) return null;
+  if (sources.length === 0) {
+    // A legitimate zero-source result is not a normal "nothing to do" case —
+    // log it so a silent, indefinite capture outage (previously
+    // indistinguishable from "everything's fine, no error ever thrown")
+    // leaves a trace to diagnose from.
+    console.error('[screenshot] desktopCapturer.getSources() returned zero sources');
+    return null;
+  }
 
   // Web Dev department only: capture the primary/main display alone, ignore
   // any secondary monitors entirely — set via setMainMonitorOnly() based on
