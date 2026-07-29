@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('trayAPI', {
   timeclockAction: (type: string, note?: string) => ipcRenderer.invoke('timeclock:action', type, note),
   checkResumableShift: () => ipcRenderer.invoke('shift:check-resumable'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  openScreenRecordingSettings: () => ipcRenderer.invoke('app:open-screen-recording-settings'),
 
   // Events from main → renderer
   onStatusUpdate: (cb: (data: unknown) => void) =>

@@ -62,6 +62,7 @@ import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt } from './idl
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
 import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly } from './screenshot';
 import { flushQueue } from './offline-queue';
+import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
 import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
 import { startRecording, stopRecording, getRecordingStatus, registerRecordingIpcHandlers, destroyRecorderWindow } from './recording';
 import { initTranscription, resetTranscript, getFullTranscript, processAudioChunk } from './transcription';
@@ -131,6 +132,10 @@ interface AgentState {
   // to. The renderer should display THIS, ticking from wallClockBaseAt.
   wallClockBaseMs: number;
   wallClockBaseAt: number | null;
+  // macOS only — null on every other platform, or before the first check
+  // has run. See permissions.ts for why this can't be assumed to stay true
+  // once granted (unsigned build).
+  screenRecordingGranted: boolean | null;
 }
 
 let tray: Tray | null = null;
@@ -139,6 +144,8 @@ let autrixWindow: BrowserWindow | null = null;
 let traySocket: TraySocket | null = null;
 
 let breakNotifyIntervalId: ReturnType<typeof setInterval> | null = null;
+let screenRecordingCheckIntervalId: ReturnType<typeof setInterval> | null = null;
+let lastNotifiedScreenRecordingMissing = false;
 let resyncIntervalId: ReturnType<typeof setInterval> | null = null;
 let autoClockoutCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let breakExceededNotified = false;
@@ -188,6 +195,7 @@ let agentState: AgentState = {
   todayTotalActiveMs: 0,
   wallClockBaseMs: 0,
   wallClockBaseAt: null,
+  screenRecordingGranted: null,
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -201,11 +209,16 @@ let agentState: AgentState = {
 // (transparent background) when a shorter view (e.g. not signed in) renders.
 const STATUS_HEIGHT_BASE = 460;
 const STATUS_HEIGHT_CALL = 528;
+// Extra room for the Screen Recording warning banner (see status.html) —
+// only added to the window when it's actually showing, so it doesn't cost
+// height for the vast majority of users who never see it.
+const SCREEN_RECORDING_BANNER_HEIGHT = 60;
 
 const broadcastState = () => {
   if (statusWindow && !statusWindow.isDestroyed()) {
     const callState = getCurrentCall();
-    const targetH = callState ? STATUS_HEIGHT_CALL : STATUS_HEIGHT_BASE;
+    const targetH = (callState ? STATUS_HEIGHT_CALL : STATUS_HEIGHT_BASE)
+      + (agentState.screenRecordingGranted === false ? SCREEN_RECORDING_BANNER_HEIGHT : 0);
     const [currentW, currentH] = statusWindow.getSize();
     if (currentH !== targetH) {
       const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
@@ -720,6 +733,54 @@ const startAgentServices = async (token: string) => {
     setSkipCaptures(!!agentState.user?.screenshotExempt);
   }
 
+  // Re-apply department-derived flags here too (not just in handleTrayAuth) —
+  // app.whenReady()'s "restore from store" startup path (every normal launch
+  // after the very first login, INCLUDING every auto-update relaunch) calls
+  // startAgentServices() directly with the cached user object and never goes
+  // through handleTrayAuth again. Since these two are plain module-level
+  // variables that default to false on every fresh process start, skipping
+  // this meant mainMonitorOnly/idleDetectionExempt silently reset to false on
+  // every restart for Web Dev users — screenshots quietly went back to
+  // capturing every monitor, and idle detection quietly turned back on —
+  // with nothing else wrong (heartbeat, shift tracking, etc. all looked
+  // normal), so there was no other signal that it had happened. (Confirmed
+  // in production: a Web Dev user went from 1 monitor to 2 immediately after
+  // the auto-update to 1.3.12 relaunched the app — the exact restart path
+  // this covers.)
+  setMainMonitorOnly(!!agentState.user?.mainMonitorOnly);
+  setIdleDetectionExempt(!!agentState.user?.idleDetectionExempt);
+
+  // macOS Screen Recording permission — the Mac build is unsigned (no Apple
+  // Developer certificate), so this permission does not reliably survive an
+  // auto-update: a user who granted it once can silently lose it again on
+  // the next update, with the tray otherwise heartbeating and running
+  // completely normally — no error, no visible symptom besides screenshots
+  // quietly stopping. Checked at startup and periodically; notifies once per
+  // loss (not every check) via a native OS notification, a persistent banner
+  // in the status window (see status.html), AND server-side (postHeartbeat
+  // reports this same value, which notifies the user's own bell/page and
+  // admins, and posts to Shift Alerts) — several channels so it isn't
+  // dependent on any single one being noticed.
+  const checkScreenRecordingPermission = () => {
+    const granted = getScreenRecordingGranted();
+    agentState.screenRecordingGranted = granted;
+    if (granted === false && !lastNotifiedScreenRecordingMissing) {
+      lastNotifiedScreenRecordingMissing = true;
+      if (Notification.isSupported()) {
+        new Notification({
+          title: 'Screen Recording permission needed',
+          body: 'Your screenshots have stopped. Click the tray icon and use "Fix Screen Recording" to re-enable it.',
+          silent: false,
+        }).show();
+      }
+    } else if (granted === true) {
+      lastNotifiedScreenRecordingMissing = false;
+    }
+    broadcastState();
+  };
+  checkScreenRecordingPermission();
+  screenRecordingCheckIntervalId = setInterval(checkScreenRecordingPermission, 5 * 60 * 1000);
+
   // Notify the user when screen capture itself fails (upload failures are queued offline)
   setCaptureFailedCallback(() => {
     if (Notification.isSupported()) {
@@ -1037,6 +1098,10 @@ const stopAgentServices = () => {
     clearInterval(activityCheckpointIntervalId);
     activityCheckpointIntervalId = null;
   }
+  if (screenRecordingCheckIntervalId) {
+    clearInterval(screenRecordingCheckIntervalId);
+    screenRecordingCheckIntervalId = null;
+  }
   breakExceededNotified = false;
   autoClockoutTriggeredForThisIdleStretch = false;
   stopIdleMonitor();
@@ -1083,6 +1148,8 @@ const handleLogout = async () => {
     todayTotalActiveMs: 0,
     wallClockBaseMs: 0,
     wallClockBaseAt: null,
+    // Machine-level, not auth-level — unaffected by signing out.
+    screenRecordingGranted: agentState.screenRecordingGranted,
   };
   updateTrayIcon();
   tray?.setContextMenu(buildTrayMenu());
@@ -1099,6 +1166,7 @@ ipcMain.handle('status:get', () => agentState);
 
 ipcMain.handle('app:open-crm', () => shell.openExternal(CRM_URL));
 ipcMain.handle('app:get-version', () => app.getVersion());
+ipcMain.handle('app:open-screen-recording-settings', () => openScreenRecordingSettings());
 
 ipcMain.handle('shift:check-resumable', async () => {
   const token = store.get('crm_token') as string | undefined;

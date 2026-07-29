@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { getIsIdle } from './idle';
+import { getScreenRecordingGranted } from './permissions';
 
 const INTERVAL_MS = 60_000; // every 60 seconds
 
@@ -28,7 +29,10 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
       const isIdle = isOnBreak || !isOnShift ? false : getIsIdle();
       await axios.post(
         `${apiUrl}${heartbeatPath}`,
-        { isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt },
+        {
+          isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt,
+          screenRecordingGranted: getScreenRecordingGranted(),
+        },
         { headers: { Authorization: `Bearer ${_activeToken}` }, timeout: 10_000 }
       );
     } catch {
