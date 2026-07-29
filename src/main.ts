@@ -1,5 +1,13 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor } from 'electron';
 app.setName('Action Auto CRM Tray-App');
+// Screenshot capture (desktopCapturer) relies on the GPU-accelerated capture
+// path, which is frequently unavailable or unreliable inside a Remote
+// Desktop / RDP / VM session (no real GPU context) — a well-documented
+// Electron/Chromium limitation. Disabling hardware acceleration makes the
+// capture path fall back to software rendering, which works consistently
+// under RDP/VMs at the cost of slightly higher CPU use for this otherwise
+// UI-less tray app (an acceptable trade since it captures periodically, not continuously).
+app.disableHardwareAcceleration();
 import path from 'path';
 import http from 'http';
 import axios from 'axios';
@@ -26,7 +34,7 @@ autoUpdater.on('update-downloaded', () => {
   if (Notification.isSupported()) {
     new Notification({
       title: 'Update ready',
-      body: 'A new version of Action Auto Tray was downloaded and will install automatically in a few seconds.',
+      body: 'A new version of Suprah AI Time Tracker was downloaded and will install automatically in a few seconds.',
       silent: true,
     }).show();
   }
@@ -185,8 +193,14 @@ let agentState: AgentState = {
 /* ─────────────────────────────────────────────────────────────────
    State broadcast helpers
 ───────────────────────────────────────────────────────────────── */
-const STATUS_HEIGHT_BASE = 400;
-const STATUS_HEIGHT_CALL = 468;
+// Bumped from 400/468 — the on-shift view (header, status pill, timers,
+// Break/End Shift row, Open CRM/Sign Out row, action message, version label)
+// was taller than the fixed window, clipping the bottom content (typically
+// the version label, sometimes the button row itself) off the visible area
+// depending on font rendering/DPI scaling. Extra height here is inert
+// (transparent background) when a shorter view (e.g. not signed in) renders.
+const STATUS_HEIGHT_BASE = 460;
+const STATUS_HEIGHT_CALL = 528;
 
 const broadcastState = () => {
   if (statusWindow && !statusWindow.isDestroyed()) {
@@ -245,7 +259,7 @@ const updateTrayIcon = () => {
       : agentState.isOnBreak
       ? `Action Auto — On Break (${agentState.user?.fullName})`
       : `Action Auto — ${agentState.user?.fullName}`
-    : 'Action Auto Tray — Not signed in';
+    : 'Suprah AI Time Tracker — Not signed in';
 
   tray.setToolTip(tooltip);
 };
@@ -315,9 +329,9 @@ const createStatusWindow = () => {
 
   statusWindow = new BrowserWindow({
     width: 300,
-    height: 400,
+    height: STATUS_HEIGHT_BASE,
     x: width - 316,
-    y: height - 416,
+    y: height - STATUS_HEIGHT_BASE - 16,
     resizable: false,
     frame: false,
     transparent: true,
@@ -1373,7 +1387,7 @@ app.whenReady().then(async () => {
   powerMonitor.on('shutdown', () => handleSystemSuspendOrShutdown('shut down'));
 
   tray = new Tray(getTrayIcon());
-  tray.setToolTip('Action Auto Tray');
+  tray.setToolTip('Suprah AI Time Tracker');
   tray.setContextMenu(buildTrayMenu());
 
   tray.on('click', () => {

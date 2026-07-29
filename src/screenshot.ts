@@ -36,6 +36,25 @@ export function setOnBreakGetter(fn: () => boolean): void {
   getIsOnBreak = fn;
 }
 
+// Reports otherwise-invisible local failures to the backend (persisted via
+// the existing logger, queryable by userId same as any server log) — the
+// tray runs hidden with no visible console, so without this there was no way
+// to find out WHY a specific user's screenshots silently stopped short of
+// asking them to physically dig up a log file. Fire-and-forget: a failure to
+// report a failure must never itself throw or block capture.
+async function reportDiagnostic(event: string, message: string, meta?: Record<string, unknown>): Promise<void> {
+  if (!apiUrl || !token) return;
+  try {
+    await axios.post(
+      `${apiUrl}/api/crm/timeproof/client-diagnostics`,
+      { event, message, meta },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 },
+    );
+  } catch {
+    // Best-effort — no local fallback needed here, this is diagnostics, not user data.
+  }
+}
+
 // Use MDT (UTC-6) so shiftDate matches the backend's COMPANY_TZ_OFFSET_MINUTES = -360
 const MDT_OFFSET_MS = -6 * 60 * 60 * 1000;
 const toShiftDate = () => {
@@ -49,18 +68,29 @@ const toShiftDate = () => {
  */
 const DEFAULT_THUMBNAIL_SIZE = { width: 1920, height: 1080 };
 
+async function getScreenSources() {
+  return desktopCapturer.getSources({ types: ['screen'], thumbnailSize: DEFAULT_THUMBNAIL_SIZE });
+}
+
 async function captureAllScreens(): Promise<Buffer | null> {
-  const sources = await desktopCapturer.getSources({
-    types: ['screen'],
-    thumbnailSize: DEFAULT_THUMBNAIL_SIZE,
-  });
+  let sources = await getScreenSources();
+
+  if (sources.length === 0) {
+    // Retry once after a short delay before giving up — remote
+    // desktop/virtual sessions can have a transient redraw/reconnect gap
+    // where the capture surface briefly isn't available, which resolves on
+    // its own a moment later.
+    await new Promise((r) => setTimeout(r, 2_000));
+    sources = await getScreenSources();
+  }
 
   if (sources.length === 0) {
     // A legitimate zero-source result is not a normal "nothing to do" case —
-    // log it so a silent, indefinite capture outage (previously
-    // indistinguishable from "everything's fine, no error ever thrown")
-    // leaves a trace to diagnose from.
+    // log it (locally and to the backend) so a silent, indefinite capture
+    // outage (previously indistinguishable from "everything's fine, no
+    // error ever thrown") leaves a trace to diagnose from.
     console.error('[screenshot] desktopCapturer.getSources() returned zero sources');
+    reportDiagnostic('screenshot_zero_sources', 'desktopCapturer.getSources() returned zero sources after retry');
     return null;
   }
 
@@ -160,6 +190,7 @@ async function captureAndUpload(): Promise<void> {
     }
   } catch (err) {
     console.error('[screenshot] Capture failed:', err);
+    reportDiagnostic('screenshot_capture_exception', 'Capture failed', { error: err instanceof Error ? err.message : String(err) });
     // Notify the user (throttled) — upload failures are handled by the offline queue
     // and are not errors worth notifying. Only actual capture errors reach here.
     const now = Date.now();
