@@ -1,7 +1,7 @@
 {
   "name": "actionauto-tray",
-  "version": "1.3.13",
-  "description": "Suprah AI Time Tracker",
+  "version": "1.4.0",
+  "description": "Suprah AI - Timeproof Clock",
   "main": "dist/main.js",
   "author": "Action Auto",
   "license": "ISC",
@@ -29,7 +29,7 @@
   },
   "build": {
     "appId": "com.actionauto.tray",
-    "productName": "Suprah AI Time Tracker",
+    "productName": "Suprah AI - Timeproof Clock",
     "directories": {
       "output": "release"
     },
@@ -57,8 +57,8 @@
       "category": "public.app-category.productivity",
       "identity": null,
       "extendInfo": {
-        "NSScreenRecordingUsageDescription": "Suprah AI Time Tracker captures periodic screenshots to verify timeproof activity.",
-        "NSScreenCaptureUsageDescription": "Suprah AI Time Tracker captures periodic screenshots to verify timeproof activity."
+        "NSScreenRecordingUsageDescription": "Suprah AI - Timeproof Clock captures periodic screenshots to verify timeproof activity.",
+        "NSScreenCaptureUsageDescription": "Suprah AI - Timeproof Clock captures periodic screenshots to verify timeproof activity."
       }
     },
     "dmg": {

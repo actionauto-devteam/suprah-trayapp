@@ -30,11 +30,31 @@ autoUpdater.logger = null;
 // need to be aggressive and doesn't add to GitHub API rate-limit pressure.
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // backstop: re-check every 30 minutes
 
+// Auto-update reliability has been observed to differ between two
+// otherwise-identical Mac machines (same chip, same Gatekeeper setting, same
+// install location, same account type, installed together) — one updates
+// fine, the other silently doesn't. The unsigned Mac build is the leading
+// suspect (Squirrel.Mac's self-update mechanism is known to be less
+// consistent without a real Apple Developer signature), but there was no way
+// to confirm what actually happens on the machine that doesn't update since
+// autoUpdater has never reported anything anywhere. These mirror the same
+// "log it so the next occurrence has real data instead of a guess" approach
+// already used for screenshot/idle diagnostics.
+autoUpdater.on('error', (err) => {
+  reportDiagnostic('autoupdate_error', 'Auto-updater error', { error: err?.message || String(err), platform: process.platform });
+});
+autoUpdater.on('update-not-available', () => {
+  reportDiagnostic('autoupdate_check_ok', 'Auto-updater checked — already on latest version', { platform: process.platform, version: app.getVersion() });
+});
+autoUpdater.on('update-available', (info) => {
+  reportDiagnostic('autoupdate_available', 'Auto-updater found a new version', { platform: process.platform, currentVersion: app.getVersion(), newVersion: info?.version });
+});
+
 autoUpdater.on('update-downloaded', () => {
   if (Notification.isSupported()) {
     new Notification({
       title: 'Update ready',
-      body: 'A new version of Suprah AI Time Tracker was downloaded and will install automatically in a few seconds.',
+      body: 'A new version of Suprah AI - Timeproof Clock was downloaded and will install automatically in a few seconds.',
       silent: true,
     }).show();
   }
@@ -58,9 +78,9 @@ const envPath = app.isPackaged
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
-import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt } from './idle';
+import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly } from './screenshot';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
 import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
@@ -267,12 +287,12 @@ const updateTrayIcon = () => {
   const tooltip = agentState.isAuthenticated
     ? effectivelyOnShift
       ? agentState.isIdle
-        ? `Action Auto — Idle (${agentState.user?.fullName})`
-        : `Action Auto — On Shift (${agentState.user?.fullName})`
+        ? `Suprah AI - Timeproof Clock — Idle (${agentState.user?.fullName})`
+        : `Suprah AI - Timeproof Clock — On Shift (${agentState.user?.fullName})`
       : agentState.isOnBreak
-      ? `Action Auto — On Break (${agentState.user?.fullName})`
-      : `Action Auto — ${agentState.user?.fullName}`
-    : 'Suprah AI Time Tracker — Not signed in';
+      ? `Suprah AI - Timeproof Clock — On Break (${agentState.user?.fullName})`
+      : `Suprah AI - Timeproof Clock — ${agentState.user?.fullName}`
+    : 'Suprah AI - Timeproof Clock — Not signed in';
 
   tray.setToolTip(tooltip);
 };
@@ -840,12 +860,36 @@ const startAgentServices = async (token: string) => {
       if (wasTracking) pingHeartbeat();
 
       if (wasTracking && Notification.isSupported()) {
+        // Includes the exact reading (not just "10+ minutes") so the user
+        // sees the same number an admin would if they ever dispute a flag —
+        // transparency here turns a "you're wrong" complaint into "here's
+        // specifically what the system measured, let's figure out why."
+        const flaggedIdleSec = powerMonitor.getSystemIdleTime();
+        const flaggedMin = Math.floor(flaggedIdleSec / 60);
+        const flaggedSec = flaggedIdleSec % 60;
         new Notification({
           title: 'You are idle',
-          body: 'You have been inactive for 10+ minutes. Timer and screenshots paused.',
+          body: `No mouse/keyboard input detected for ${flaggedMin}m ${flaggedSec}s. Timer and screenshots paused.`,
           silent: false,
         }).show();
       }
+
+      // Users have repeatedly reported being flagged idle while they believe
+      // they were actively working — logs the OS's own raw idle-seconds
+      // reading (not just the derived boolean) so a future occurrence can be
+      // checked against what the OS actually reported, rather than relying on
+      // the user's recollection alone to tell a genuine input-detection quirk
+      // (wireless peripheral dropout, driver issue) apart from anything else.
+      reportDiagnostic('idle_detected', 'User flagged idle', {
+        idleSeconds: powerMonitor.getSystemIdleTime(),
+        // Recent readings (~30s apart) leading up to this flag — a clean
+        // climb toward the 600s threshold reads very differently from a
+        // sudden jump, which points to a sleep/wake or clock event rather
+        // than genuine gradual inactivity.
+        idleSecondsHistory: getIdleSecondsHistory(),
+        platform: process.platform,
+        wasTracking,
+      });
     } else if (!isIdle && wasIdle) {
       // User became active — resume only if clocked in and not on break
       if (wasTracking) {
@@ -862,6 +906,21 @@ const startAgentServices = async (token: string) => {
     }
 
     broadcastState();
+  }, (idleSeconds, exempt) => {
+    // Unconditional trace every ~5 minutes regardless of whether idle ever
+    // fires — otherwise a "detection never triggers" bug looks identical to
+    // "genuinely never idle" in the logs (both produce zero idle_detected
+    // reports). This turns silence into actual data: no periodic reports at
+    // all means the check loop itself isn't running; reports that show the
+    // number never climbing despite genuine inactivity means the OS isn't
+    // seeing input loss the way it should on this machine.
+    reportDiagnostic('idle_periodic_check', 'Periodic idle-check trace', {
+      idleSeconds,
+      idleDetectionExempt: exempt,
+      isOnShift: agentState.isOnShift,
+      isOnBreak: agentState.isOnBreak,
+      platform: process.platform,
+    });
   });
 
   // Periodic checkpoint: while actively tracking, commit the segment so far
@@ -910,25 +969,28 @@ const startAgentServices = async (token: string) => {
     }
   }, 30_000);
 
-  // Auto clock-out: once a shift has already rendered 8+ hours, 30 continuous
-  // minutes of no keyboard/mouse input is treated as "done and forgot to end
-  // shift" rather than a normal break. Checked every 60s against the OS's own
-  // idle-time counter (not our 30s poll cadence) so it fires close to the
-  // 30-minute mark regardless of when the last check happened to run.
+  // Auto clock-out: 30 continuous minutes of no keyboard/mouse input while
+  // still clocked in is treated as "done and forgot to end shift" — checked
+  // regardless of hours already rendered. Previously gated behind 8+ hours
+  // rendered, which meant an early-out (e.g. someone who stops working after
+  // only a few hours and simply forgets/fails to click End Shift) had no
+  // protection at all and could sit "on shift" idle for the rest of the day.
+  // Checked every 60s against the OS's own idle-time counter (not our 30s
+  // poll cadence) so it fires close to the 30-minute mark regardless of when
+  // the last check happened to run.
   autoClockoutTriggeredForThisIdleStretch = false;
   autoClockoutCheckIntervalId = setInterval(async () => {
     if (!agentState.isOnShift || agentState.isOnBreak) { autoClockoutTriggeredForThisIdleStretch = false; return; }
     const idleMs = powerMonitor.getSystemIdleTime() * 1000;
     if (idleMs < AUTO_CLOCKOUT_IDLE_MS) { autoClockoutTriggeredForThisIdleStretch = false; return; }
     if (autoClockoutTriggeredForThisIdleStretch) return;
-    if (getRenderedMsSoFar() < AUTO_CLOCKOUT_RENDERED_HOURS_MS) return; // hasn't earned the 8h yet — leave shift open
 
     autoClockoutTriggeredForThisIdleStretch = true;
-    const result = await performClockAction('time-out', 'Auto clock-out — 30+ minutes without activity after rendering 8+ hours');
+    const result = await performClockAction('time-out', 'Auto clock-out — 30+ minutes without activity');
     if (result.success && Notification.isSupported()) {
       new Notification({
         title: 'Shift ended automatically',
-        body: 'You were inactive for 30+ minutes after completing 8 hours — your shift was clocked out. Click Resume if you\'re still working.',
+        body: 'You were inactive for 30+ minutes — your shift was clocked out. Click Resume if you\'re still working.',
         silent: false,
       }).show();
     }
@@ -1454,8 +1516,40 @@ app.whenReady().then(async () => {
   powerMonitor.on('suspend', () => handleSystemSuspendOrShutdown('went to sleep'));
   powerMonitor.on('shutdown', () => handleSystemSuspendOrShutdown('shut down'));
 
+  // Suspend already checkpoints and rolls activityStartMs forward to the
+  // moment sleep began (see handleSystemSuspendOrShutdown above) — but nothing
+  // handled the OTHER end of that gap. Tracking relied entirely on the idle
+  // monitor's own next tick to notice the sleep-induced gap and truncate it
+  // correctly via getSystemIdleTime(). That reading has already been found
+  // (this week's "one Mac updates, another doesn't" + recurring "false idle"
+  // reports) to be inconsistent across sleep/wake on some hardware/OS
+  // combinations — sometimes it comes back low right after waking instead of
+  // reflecting the real sleep duration. When that happens, isIdle never flips,
+  // the idle-transition truncation in startIdleMonitor's callback never runs,
+  // and the next unrelated event (10-min periodic checkpoint, a break, etc.)
+  // commits straight from the pre-sleep activityStartMs to Date.now() —
+  // silently crediting the entire sleep duration as active work time. Forcing
+  // idle state on resume, the same way a real "went idle" transition does,
+  // closes that gap regardless of what the idle-timer reports afterward: real
+  // input arriving post-wake still flips back to active normally (same
+  // !isIdle && wasIdle branch below), it just can no longer skip that check.
+  powerMonitor.on('resume', () => {
+    if (agentState.isOnShift && !agentState.isOnBreak && activityStartMs !== null) {
+      activityStartMs = null;
+      agentState.activityStartMs = null;
+      agentState.isIdle = true;
+      forceIdleState(true);
+      stopScreenshots();
+      agentState.nextScreenshotIn = null;
+      reportDiagnostic('resume_from_suspend', 'System resumed from sleep — forced idle pending real input', {
+        platform: process.platform,
+      });
+      broadcastState();
+    }
+  });
+
   tray = new Tray(getTrayIcon());
-  tray.setToolTip('Suprah AI Time Tracker');
+  tray.setToolTip('Suprah AI - Timeproof Clock');
   tray.setContextMenu(buildTrayMenu());
 
   tray.on('click', () => {

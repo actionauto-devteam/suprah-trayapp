@@ -10,12 +10,24 @@ const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const CAPTURE_FAIL_COOLDOWN_MS = 30 * 60 * 1000; // notify at most once per 30 min
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
+let watchdogIntervalId: ReturnType<typeof setInterval> | null = null;
 let apiUrl = '';
 let token = '';
 let captureFailedCb: (() => void) | null = null;
 let lastCaptureFailedAt = 0;
 let getIsOnBreak: () => boolean = () => false;
 let skipCaptures = false;
+// Tracks the last time a capture actually produced an outcome (uploaded
+// directly OR saved to the offline queue for later — both mean the pipeline
+// itself is working, just network availability differs) versus merely being
+// attempted. Users have repeatedly reported screenshots silently stopping
+// for hours at a time with no error ever surfacing (works fine one day, zero
+// captures the next, same account, same machine) — this powers a watchdog
+// that self-heals by recreating the interval instead of relying on someone
+// noticing and manually restarting the tray.
+let lastCaptureOutcomeAt = 0;
+const WATCHDOG_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const WATCHDOG_STALL_THRESHOLD_MS = 25 * 60 * 1000; // ~2.5 capture cycles
 // Web Dev department only (see isMainMonitorOnlyDept on the backend) — set
 // once per login via main.ts based on the logged-in user's department.
 let mainMonitorOnly = false;
@@ -42,7 +54,7 @@ export function setOnBreakGetter(fn: () => boolean): void {
 // to find out WHY a specific user's screenshots silently stopped short of
 // asking them to physically dig up a log file. Fire-and-forget: a failure to
 // report a failure must never itself throw or block capture.
-async function reportDiagnostic(event: string, message: string, meta?: Record<string, unknown>): Promise<void> {
+export async function reportDiagnostic(event: string, message: string, meta?: Record<string, unknown>): Promise<void> {
   if (!apiUrl || !token) return;
   try {
     await axios.post(
@@ -178,6 +190,7 @@ async function captureAndUpload(): Promise<void> {
         headers: { ...form.getHeaders(), Authorization: `Bearer ${token}` },
         timeout: 30_000,
       });
+      lastCaptureOutcomeAt = Date.now();
     } catch {
       // No internet — save locally and queue for later
       const localDir = path.join(app.getPath('userData'), 'screenshot-cache', shiftDate);
@@ -187,6 +200,7 @@ async function captureAndUpload(): Promise<void> {
       fs.writeFileSync(filePath, jpegBuffer);
 
       enqueue({ filePath, shiftDate, capturedAt, idleDetected: false });
+      lastCaptureOutcomeAt = Date.now();
     }
   } catch (err) {
     console.error('[screenshot] Capture failed:', err);
@@ -229,13 +243,43 @@ export function startScreenshots(url: string, authToken: string): void {
   if (intervalId) return;
   apiUrl = url;
   token = authToken;
+  lastCaptureOutcomeAt = Date.now(); // baseline — otherwise the watchdog sees a "stall" instantly on startup
   intervalId = setInterval(captureAndUpload, INTERVAL_MS);
+
+  // Self-healing watchdog: if we've been actively (non-idle, non-break)
+  // eligible to capture for well over two full cycles with zero successful
+  // outcome, something has silently wedged — recreate the interval (and
+  // report it) instead of waiting for someone to notice and manually
+  // restart the tray. Doesn't touch capturedAt logic; just gives a fresh
+  // setInterval/desktopCapturer call chain a chance to recover.
+  if (!watchdogIntervalId) {
+    watchdogIntervalId = setInterval(() => {
+      if (skipCaptures || getIsIdle() || getIsOnBreak()) {
+        lastCaptureOutcomeAt = Date.now(); // not stalled — legitimately not trying right now
+        return;
+      }
+      const stalledMs = Date.now() - lastCaptureOutcomeAt;
+      if (stalledMs > WATCHDOG_STALL_THRESHOLD_MS) {
+        console.error(`[screenshot] Watchdog: no successful capture in ${Math.round(stalledMs / 60_000)} min — restarting capture interval`);
+        reportDiagnostic('screenshot_watchdog_restart', 'No successful capture outcome for too long — restarting capture interval', {
+          stalledMinutes: Math.round(stalledMs / 60_000),
+        });
+        if (intervalId) clearInterval(intervalId);
+        lastCaptureOutcomeAt = Date.now();
+        intervalId = setInterval(captureAndUpload, INTERVAL_MS);
+      }
+    }, WATCHDOG_CHECK_INTERVAL_MS);
+  }
 }
 
 export function stopScreenshots(): void {
   if (intervalId) {
     clearInterval(intervalId);
     intervalId = null;
+  }
+  if (watchdogIntervalId) {
+    clearInterval(watchdogIntervalId);
+    watchdogIntervalId = null;
   }
   skipCaptures = false;
 }
