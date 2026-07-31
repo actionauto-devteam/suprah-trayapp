@@ -54,16 +54,37 @@ export function setOnBreakGetter(fn: () => boolean): void {
 // to find out WHY a specific user's screenshots silently stopped short of
 // asking them to physically dig up a log file. Fire-and-forget: a failure to
 // report a failure must never itself throw or block capture.
+//
+// The report itself has repeatedly come back completely empty for a live
+// test account (every event type, not just idle-related ones) with no way to
+// tell from the backend side alone whether the tray ever attempted the POST
+// at all. A local fallback line — written straight to disk on THIS machine,
+// no server round-trip required — turns that invisible failure into
+// something checkable directly on the packaged install, without needing to
+// run from source to see console output.
+const DIAGNOSTIC_DEBUG_LOG = path.join(app.getPath('userData'), 'diagnostic-debug.log');
+const logDiagnosticAttempt = (line: string): void => {
+  try {
+    fs.appendFileSync(DIAGNOSTIC_DEBUG_LOG, `[${new Date().toISOString()}] ${line}\n`);
+  } catch {
+  }
+};
+
 export async function reportDiagnostic(event: string, message: string, meta?: Record<string, unknown>): Promise<void> {
-  if (!apiUrl || !token) return;
+  if (!apiUrl || !token) {
+    logDiagnosticAttempt(`SKIPPED ${event} — apiUrl=${apiUrl ? 'set' : 'EMPTY'} token=${token ? 'set' : 'EMPTY'}`);
+    return;
+  }
   try {
     await axios.post(
       `${apiUrl}/api/crm/timeproof/client-diagnostics`,
       { event, message, meta },
       { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 },
     );
-  } catch {
-    // Best-effort — no local fallback needed here, this is diagnostics, not user data.
+    logDiagnosticAttempt(`SENT ${event}`);
+  } catch (err) {
+    const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+    logDiagnosticAttempt(`FAILED ${event} — status=${axiosErr?.response?.status ?? 'none'} ${axiosErr?.message ?? String(err)}`);
   }
 }
 
