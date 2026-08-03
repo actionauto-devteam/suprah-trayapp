@@ -99,7 +99,7 @@
       border-bottom: 1px solid #1e1e1e;
       padding: 6px 12px;
       font-size: 11px;
-      color: #555;
+      color: #8a8a8a;
       flex-shrink: 0;
       max-height: 48px;
       overflow: hidden;
@@ -107,7 +107,7 @@
       display: none;
     }
     .transcript-strip.visible { display: block; }
-    .transcript-strip .label { color: #3f3f3f; font-weight: 600; margin-right: 4px; }
+    .transcript-strip .label { color: #6b6b6b; font-weight: 600; margin-right: 4px; }
 
     /* Messages */
     .messages {
@@ -159,7 +159,7 @@
 
     .msg-meta {
       font-size: 10px;
-      color: #444;
+      color: #8a8a8a;
       margin-top: 3px;
     }
     .msg.assistant .msg-meta { text-align: left; }
@@ -186,7 +186,7 @@
       transition: all 0.15s;
       white-space: nowrap;
     }
-    .suggestion-btn:hover { background: #222; color: #c0c0c0; border-color: #333; }
+    .suggestion-btn:hover { background: #222; color: #c0c0c0; border-color: #666; }
 
     /* Input area */
     .input-area {
@@ -217,7 +217,7 @@
       transition: border-color 0.15s;
     }
     textarea:focus { border-color: #4f46e5; }
-    textarea::placeholder { color: #3a3a3a; }
+    textarea::placeholder { color: #6b6b6b; }
 
     .send-btn {
       width: 36px;
@@ -235,7 +235,7 @@
       transition: background 0.15s;
     }
     .send-btn:hover { background: #4338ca; }
-    .send-btn:disabled { background: #1e1e1e; color: #333; cursor: not-allowed; }
+    .send-btn:disabled { background: #1e1e1e; color: #666; cursor: not-allowed; }
 
     .empty-state {
       flex: 1;
@@ -244,7 +244,7 @@
       align-items: center;
       justify-content: center;
       gap: 8px;
-      color: #333;
+      color: #666;
       padding: 24px;
       text-align: center;
     }
@@ -480,7 +480,7 @@
   api.onCallEnded(() => {
     showRecIndicator(false);
     const div = document.createElement('div');
-    div.style.cssText = 'font-size:11px;color:#444;text-align:center;padding:8px;';
+    div.style.cssText = 'font-size:11px;color:#8a8a8a;text-align:center;padding:8px;';
     div.textContent = '— Call ended —';
     messagesEl.appendChild(div);
     messagesEl.scrollTop = messagesEl.scrollHeight;

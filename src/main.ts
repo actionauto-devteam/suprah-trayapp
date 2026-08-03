@@ -890,6 +890,28 @@ const startAgentServices = async (token: string) => {
         platform: process.platform,
         wasTracking,
       });
+
+      // Evidence screenshot for "but I was moving!" disputes — paired on the
+      // admin side with whichever regular capture happened last before this
+      // (already-existing, unchanged) so a specific idle flag can be checked
+      // against what the screen actually looked like right before and right
+      // at the 10-minute mark. Deliberately last in this block and NOT
+      // awaited — commitActiveSegment/pingHeartbeat/the notification above
+      // are all time-sensitive (admin escalation timing depends on the
+      // heartbeat landing promptly) and must never wait on a screenshot
+      // upload. Guarded the same way the existing end-of-shift capture is
+      // (CRM mode only — main-mode/Lot Tech never takes screenshots at all)
+      // plus an explicit screenshotExempt check the existing call site
+      // doesn't have, so an individually-exempted account never gets one
+      // here either. Web Dev needs no separate check: idleDetectionExempt
+      // already keeps isIdle from ever becoming true for them, so this
+      // whole branch is already unreachable for that department.
+      if (wasTracking && getAuthMode() === 'crm' && !agentState.user?.screenshotExempt) {
+        const currentToken = store.get('crm_token') as string | undefined;
+        if (currentToken) {
+          captureAndUploadOnce(API_URL, currentToken).catch(() => {});
+        }
+      }
     } else if (!isIdle && wasIdle) {
       // User became active — resume only if clocked in and not on break
       if (wasTracking) {

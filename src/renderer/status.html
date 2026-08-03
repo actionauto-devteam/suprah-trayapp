@@ -63,7 +63,7 @@
 
     .user-role {
       font-size: 10px;
-      color: #444;
+      color: #8a8a8a;
       text-transform: uppercase;
       letter-spacing: 0.1em;
       font-weight: 600;
@@ -78,7 +78,7 @@
       flex-shrink: 0;
     }
     .agent-dot.online { background: #16a34a; box-shadow: 0 0 6px rgba(22,163,74,0.5); }
-    .agent-dot.offline { background: #555; }
+    .agent-dot.offline { background: #8a8a8a; }
 
     /* Status section */
     .status-section {
@@ -117,7 +117,7 @@
 
     .status-pill.offline {
       background: rgba(100,100,100,0.08);
-      color: #555;
+      color: #8a8a8a;
       border: 1px solid #222;
     }
 
@@ -155,7 +155,7 @@
       font-weight: 700;
       text-transform: uppercase;
       letter-spacing: 0.12em;
-      color: #444;
+      color: #8a8a8a;
     }
 
     .timer-value {
@@ -200,14 +200,14 @@
 
     .btn-ghost {
       background: #161616;
-      color: #555;
+      color: #8a8a8a;
       border: 1px solid #222;
     }
     .btn-ghost:hover { background: #1c1c1c; color: #888; }
 
     .btn-danger {
       background: transparent;
-      color: #3f3f3f;
+      color: #6b6b6b;
       border: 1px solid #1e1e1e;
     }
     .btn-danger:hover { color: #f87171; border-color: rgba(248,113,113,0.2); }
@@ -228,7 +228,7 @@
 
     .btn-end-shift {
       background: transparent;
-      color: #444;
+      color: #8a8a8a;
       border: 1px solid #1e1e1e;
       font-size: 11px;
     }
@@ -245,7 +245,7 @@
     .action-msg {
       font-size: 10px;
       text-align: center;
-      color: #444;
+      color: #8a8a8a;
       min-height: 13px;
     }
 
@@ -303,11 +303,11 @@
       border-radius: 8px;
       padding: 8px 12px;
     }
-    .modal-worked-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #444; }
+    .modal-worked-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #8a8a8a; }
     .modal-worked-value { font-size: 13px; font-weight: 800; font-variant-numeric: tabular-nums; color: #e5e5e5; }
 
     .modal-field { display: flex; flex-direction: column; gap: 4px; }
-    .modal-field label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #444; }
+    .modal-field label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: #8a8a8a; }
     .modal-field select, .modal-field textarea {
       background: #1a1a1a;
       border: 1px solid #262626;
@@ -325,7 +325,7 @@
     .modal-confirm-body { padding: 16px 14px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
     .modal-confirm-icon { font-size: 28px; }
     .modal-confirm-title { font-size: 13px; font-weight: 800; color: #f0f0f0; }
-    .modal-confirm-sub { font-size: 11px; color: #555; }
+    .modal-confirm-sub { font-size: 11px; color: #8a8a8a; }
 
     .btn-red { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
     .btn-red:hover { background: rgba(239,68,68,0.25); }
@@ -370,7 +370,7 @@
 
     .call-title {
       font-size: 11px;
-      color: #555;
+      color: #8a8a8a;
       flex: 1;
       white-space: nowrap;
       overflow: hidden;
@@ -729,7 +729,7 @@
     const showMsg = (msg, isError = false) => {
       const el = document.getElementById('actionMsg');
       el.textContent = msg;
-      el.style.color = isError ? '#f87171' : '#555';
+      el.style.color = isError ? '#f87171' : '#8a8a8a';
       setTimeout(() => { if (el.textContent === msg) el.textContent = ''; }, 3000);
     };
 
