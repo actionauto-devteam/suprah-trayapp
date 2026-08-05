@@ -1,12 +1,5 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor } from 'electron';
 app.setName('Action Auto CRM Tray-App');
-// Screenshot capture (desktopCapturer) relies on the GPU-accelerated capture
-// path, which is frequently unavailable or unreliable inside a Remote
-// Desktop / RDP / VM session (no real GPU context) — a well-documented
-// Electron/Chromium limitation. Disabling hardware acceleration makes the
-// capture path fall back to software rendering, which works consistently
-// under RDP/VMs at the cost of slightly higher CPU use for this otherwise
-// UI-less tray app (an acceptable trade since it captures periodically, not continuously).
 app.disableHardwareAcceleration();
 import path from 'path';
 import http from 'http';
@@ -14,32 +7,14 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import { autoUpdater } from 'electron-updater';
 
-// Check for updates silently in the background. This is a tray-only app that
-// is designed to stay running for days without a manual restart, so checking
-// once at launch isn't enough — it re-checks periodically below — and once an
-// update is downloaded it installs and relaunches itself rather than waiting
-// for the user to quit, since that quit may never naturally happen.
 autoUpdater.autoDownload = true;
 autoUpdater.autoInstallOnAppQuit = true;
 autoUpdater.logger = null;
 
-// Real-time detection now comes from the backend pushing 'tray:check-update'
-// over the socket the moment a release is published (see connectSocket call
-// in startAgentServices) — this interval is just a backstop for a tray that
-// happened to be offline/disconnected when that push fired, so it doesn't
-// need to be aggressive and doesn't add to GitHub API rate-limit pressure.
+
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // backstop: re-check every 30 minutes
 
-// Auto-update reliability has been observed to differ between two
-// otherwise-identical Mac machines (same chip, same Gatekeeper setting, same
-// install location, same account type, installed together) — one updates
-// fine, the other silently doesn't. The unsigned Mac build is the leading
-// suspect (Squirrel.Mac's self-update mechanism is known to be less
-// consistent without a real Apple Developer signature), but there was no way
-// to confirm what actually happens on the machine that doesn't update since
-// autoUpdater has never reported anything anywhere. These mirror the same
-// "log it so the next occurrence has real data instead of a guess" approach
-// already used for screenshot/idle diagnostics.
+// Platform-wide fatal error before per-org processing, notify all admins.
 autoUpdater.on('error', (err) => {
   reportDiagnostic('autoupdate_error', 'Auto-updater error', { error: err?.message || String(err), platform: process.platform });
 });
@@ -53,17 +28,12 @@ autoUpdater.on('update-available', (info) => {
 autoUpdater.on('update-downloaded', () => {
   if (Notification.isSupported()) {
     new Notification({
-      title: 'Update ready',
-      body: 'A new version of Suprah AI - Timeproof Clock was downloaded and will install automatically in a few seconds.',
+      title: "Update ready",
+      body: "A new version of Suprah AI - Timeproof Clock was downloaded and will install automatically in a few seconds.",
       silent: true,
     }).show();
   }
-  // Give the notification a moment to render, then apply the update ourselves —
-  // silent install, auto-relaunch — so no manual close/reopen is needed, even
-  // while the user is actively clocked in. Flush whatever's been tracked since
-  // the last checkpoint FIRST — quitAndInstall terminates the process, and
-  // without this the in-memory-only active segment would be silently lost,
-  // same failure mode as an unexpected crash.
+  // Silent auto-update: flush tracked data first, then quitAndInstall to avoid losing active segment.
   setTimeout(async () => {
     if (activityStartMs !== null) {
       await commitActiveSegment(new Date());
@@ -146,15 +116,10 @@ interface AgentState {
   // Activity-based tracking (idle-aware timer)
   activityStartMs: number | null;
   todayTotalActiveMs: number;
-  // Authoritative rendered-hours baseline — same wall-clock (TimeLog-based)
-  // figure that powers the CRM's Today card / calendar, which never suffers
-  // the "resets to zero" bug the activityStartMs-based timer above is prone
-  // to. The renderer should display THIS, ticking from wallClockBaseAt.
+  // Authoritative rendered-hours baseline from TimeLog (CRM Today card), ticks from wallClockBaseAt, avoids activityStartMs reset bug.
   wallClockBaseMs: number;
   wallClockBaseAt: number | null;
-  // macOS only — null on every other platform, or before the first check
-  // has run. See permissions.ts for why this can't be assumed to stay true
-  // once granted (unsigned build).
+  // macOS-only flag; null elsewhere or before first check, not guaranteed stable once granted (unsigned build).
   screenRecordingGranted: boolean | null;
 }
 
@@ -171,20 +136,14 @@ let autoClockoutCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let breakExceededNotified = false;
 let autoClockoutTriggeredForThisIdleStretch = false;
 
-// Rendered hours (net of breaks) a shift must already have before either
-// auto-clock-out trigger below (idle timeout or sleep/shutdown) becomes
-// active — a shift that hasn't reached this yet is left alone even if the
-// machine goes idle or to sleep.
+// Minimum rendered hours before auto-clock-out triggers (idle timeout or sleep/shutdown) can apply.
 const AUTO_CLOCKOUT_RENDERED_HOURS_MS = 8 * 60 * 60 * 1000;
 const AUTO_CLOCKOUT_IDLE_MS = 30 * 60 * 1000;
 
 /**
- * Rendered (active, break-excluded) milliseconds for the current shift so
- * far — uses the authoritative wall-clock baseline (same figure backing the
- * CRM's Today card), not the activityStartMs/todayTotalActiveMs pair, since
- * auto-clockout decisions below depend on this crossing the 8h threshold
- * correctly and that pair has repeatedly been found to under-report after
- * a failed checkpoint, stale heartbeat, or idle-detection flap.
+ * Rendered active ms for current shift (breaks excluded), from authoritative
+ * wall‑clock baseline (CRM Today card), not activityStartMs/todayTotalActiveMs,
+ * so auto‑clockout decisions hit the 8h threshold correctly without under‑reporting.
  */
 const getRenderedMsSoFar = (): number =>
   wallClockBaseMs + (wallClockBaseAt !== null ? Date.now() - wallClockBaseAt : 0);
@@ -221,17 +180,12 @@ let agentState: AgentState = {
 /* ─────────────────────────────────────────────────────────────────
    State broadcast helpers
 ───────────────────────────────────────────────────────────────── */
-// Bumped from 400/468 — the on-shift view (header, status pill, timers,
-// Break/End Shift row, Open CRM/Sign Out row, action message, version label)
-// was taller than the fixed window, clipping the bottom content (typically
-// the version label, sometimes the button row itself) off the visible area
-// depending on font rendering/DPI scaling. Extra height here is inert
-// (transparent background) when a shorter view (e.g. not signed in) renders.
+// Increased window height to prevent clipping of bottom content (version label/button row) 
+// on high DPI/font scaling; extra space is transparent when shorter views render.
 const STATUS_HEIGHT_BASE = 460;
 const STATUS_HEIGHT_CALL = 528;
-// Extra room for the Screen Recording warning banner (see status.html) —
-// only added to the window when it's actually showing, so it doesn't cost
-// height for the vast majority of users who never see it.
+// Extra height reserved for Screen Recording warning banner; 
+// only added when shown, so no impact for users who never see it.
 const SCREEN_RECORDING_BANNER_HEIGHT = 60;
 
 const broadcastState = () => {
@@ -550,51 +504,37 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       });
       const s = data?.data;
       if (!s) return;
-      // Trust the backend's isOnShift for display so the tray UI matches the CRM and
-      // does not desync when a shift crosses MDT midnight or runs slightly long. The
-      // original "isShiftFromToday" guard incorrectly hid legitimate ongoing shifts
-      // that started yesterday MDT, causing "already clocked in" errors when the user
-      // tried to click Start Shift again on a tray that wrongly showed "Off Shift".
-      //
-      // For genuine forgotten clock-outs (shift older than ~16 hours), we still avoid
-      // auto-starting activity tracking — but the user sees the on-shift state and
-      // can press End Shift to close it cleanly.
       const STALE_SHIFT_MS = 16 * 60 * 60 * 1000;
       const elapsedMs = s.shiftStartedAt
         ? Date.now() - new Date(s.shiftStartedAt).getTime()
         : 0;
       const isStaleShift = !!s.isOnShift && elapsedMs > STALE_SHIFT_MS;
 
-      agentState.isOnShift              = !!s.isOnShift;
-      agentState.isOnBreak              = s.isOnShift ? !!s.isOnBreak : false;
-      agentState.shiftStartedAt         = s.isOnShift ? (s.shiftStartedAt ?? null) : null;
-      agentState.breakStartedAt         = s.isOnShift ? (s.breakStartedAt ?? null) : null;
-      agentState.totalBreakSeconds      = s.isOnShift ? (s.totalBreakSeconds ?? 0) : 0;
+      agentState.isOnShift = !!s.isOnShift;
+      agentState.isOnBreak = s.isOnShift ? !!s.isOnBreak : false;
+      agentState.shiftStartedAt = s.isOnShift
+        ? (s.shiftStartedAt ?? null)
+        : null;
+      agentState.breakStartedAt = s.isOnShift
+        ? (s.breakStartedAt ?? null)
+        : null;
+      agentState.totalBreakSeconds = s.isOnShift
+        ? (s.totalBreakSeconds ?? 0)
+        : 0;
       agentState.todayTotalWorkedSeconds = s.todayTotalWorkedSeconds ?? 0;
-      // Authoritative wall-clock baseline for display + auto-clockout hour
-      // checks (see getRenderedMsSoFar) — always correct, TimeLog-based, so
-      // it never suffers the reset/freeze bugs the activityStartMs pair below
-      // has repeatedly hit.
       wallClockBaseMs = (s.wallClockRenderedSeconds ?? 0) * 1000;
-      wallClockBaseAt = (s.isOnShift && !s.isOnBreak) ? Date.now() : null;
+      wallClockBaseAt = s.isOnShift && !s.isOnBreak ? Date.now() : null;
       agentState.wallClockBaseMs = wallClockBaseMs;
       agentState.wallClockBaseAt = wallClockBaseAt;
-      // Activity-based tracking: pull the authoritative completed-interval total from the server.
-      // We do NOT restore activityStartMs from currentIntervalStartAt because that value could
-      // be stale (written before a restart) and would inflate the timer with offline time.
-      // The live interval start is managed locally and reset fresh on each app session.
       todayTotalActiveMs = (s.todayTotalActiveSeconds ?? 0) * 1000;
       agentState.todayTotalActiveMs = todayTotalActiveMs;
 
-      // If activityStartMs is from before today's MDT midnight it's a stale carry-over
-      // from a shift that ran across midnight. Reset it so the tray timer doesn't display
-      // yesterday's elapsed time (e.g. 12+ hours) as today's work time.
-      // The COMPANY_TZ_OFFSET_MINUTES constant is defined on the backend (UTC-6 = -360 min).
-      // We replicate the same arithmetic here: MDT midnight = today's UTC midnight + 6h.
+      // Reset activityStartMs if it predates today’s MDT midnight (UTC midnight +6h) to avoid showing yesterday’s elapsed time as today’s work.
       const MDT_OFFSET_MS = -6 * 60 * 60 * 1000; // UTC-6
       const nowInMDT = new Date(Date.now() + MDT_OFFSET_MS);
-      const todayMDTDateStr = nowInMDT.toISOString().split('T')[0];
-      const todayMDTMidnightUTC = new Date(todayMDTDateStr + 'T00:00:00.000Z').getTime() - MDT_OFFSET_MS;
+      const todayMDTDateStr = nowInMDT.toISOString().split("T")[0];
+      const todayMDTMidnightUTC =
+        new Date(todayMDTDateStr + "T00:00:00.000Z").getTime() - MDT_OFFSET_MS;
       if (activityStartMs !== null && activityStartMs < todayMDTMidnightUTC) {
         activityStartMs = null;
         agentState.activityStartMs = null;
@@ -602,66 +542,73 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         agentState.nextScreenshotIn = null;
       }
 
-      // Reconcile activity tracking with authoritative server state.
-      // Socket event handlers handle real-time transitions; syncShiftState
-      // patches missed socket events (missed break-in, missed time-out).
-      // For stale shifts (forgotten clock-outs > 16h) we still surface on-shift
-      // status in the UI but skip auto-starting the activity counter — the user
-      // must explicitly end the old shift to start a fresh one.
-      const isNowTracking = agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle && !isStaleShift;
+      // Sync activity with server state; socket handles real-time, syncShiftState patches missed events,
+      // stale shifts (>16h) show on-shift but require manual end before new start.
+      const isNowTracking =
+        agentState.isOnShift &&
+        !agentState.isOnBreak &&
+        !agentState.isIdle &&
+        !isStaleShift;
 
-      if (agentState.isOnShift && agentState.isOnBreak && activityStartMs !== null) {
+      if (
+        agentState.isOnShift &&
+        agentState.isOnBreak &&
+        activityStartMs !== null
+      ) {
         // CONFIRMED on break but local interval is still running → missed break-in event.
         // Flush the interval up to when the break started so work time is preserved.
         const stopAt = agentState.breakStartedAt
           ? new Date(agentState.breakStartedAt).getTime()
           : Date.now();
         const durationMs = Math.max(0, stopAt - activityStartMs);
-        const tkn = store.get('crm_token') as string | undefined;
+        const tkn = store.get("crm_token") as string | undefined;
         if (tkn && durationMs >= 30_000) {
-          axios.post(
-            `${API_URL}${getActivityIntervalUrl()}`,
-            { startAt: new Date(activityStartMs).toISOString(), endAt: new Date(stopAt).toISOString() },
-            { headers: { Authorization: `Bearer ${tkn}` }, timeout: 10_000 }
-          ).then(() => {
-            todayTotalActiveMs += durationMs;
-            agentState.todayTotalActiveMs = todayTotalActiveMs;
-            broadcastState();
-          }).catch(() => {});
+          axios
+            .post(
+              `${API_URL}${getActivityIntervalUrl()}`,
+              {
+                startAt: new Date(activityStartMs).toISOString(),
+                endAt: new Date(stopAt).toISOString(),
+              },
+              { headers: { Authorization: `Bearer ${tkn}` }, timeout: 10_000 },
+            )
+            .then(() => {
+              todayTotalActiveMs += durationMs;
+              agentState.todayTotalActiveMs = todayTotalActiveMs;
+              broadcastState();
+            })
+            .catch(() => {});
         }
         activityStartMs = null;
         agentState.activityStartMs = null;
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (!agentState.isOnShift && activityStartMs !== null) {
-        // Server confirms off-shift (clocked out) but local timer is still running.
-        // This happens when the time-out socket event was missed.
-        // The socket handler already committed the interval — just clear the local state.
+        // Clear local timer state when server confirms off-shift but timeout event was missed.
         activityStartMs = null;
         agentState.activityStartMs = null;
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (isNowTracking && activityStartMs === null) {
-        // Active but no local interval. Auto-resume tracking when:
-        //  (a) shift started < 5 min ago — covers the "user just clicked Start Shift
-        //      in the CRM, then the tray opens/syncs" handoff, OR
-        //  (b) shift is from TODAY (MDT) — covers tray restarts during an active shift
-        //      (crash, auto-update, system reboot). The idle monitor handles mid-session
-        //      pauses; syncShiftState must handle the cold-start case.
-        //
-        // Shifts from a PREVIOUS day that were never clocked out are left paused —
-        // the user sees "Shift Open — Tap Resume" and can close or resume explicitly.
+        // Auto-resume tracking if shift <5min old or from today; older unclosed shifts stay paused for manual resume.
         const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
         const shiftStartedAtMs = agentState.shiftStartedAt
-          ? new Date(agentState.shiftStartedAt).getTime() : 0;
-        const shiftStartedRecently = shiftStartedAtMs > 0
-          && (Date.now() - shiftStartedAtMs) < SHIFT_AUTO_RESUME_MS;
+          ? new Date(agentState.shiftStartedAt).getTime()
+          : 0;
+        const shiftStartedRecently =
+          shiftStartedAtMs > 0 &&
+          Date.now() - shiftStartedAtMs < SHIFT_AUTO_RESUME_MS;
         const isFromToday = !!s.isShiftFromToday;
 
         if (shiftStartedRecently || isFromToday) {
           const serverIntervalStart = s.currentIntervalStartAt
-            ? new Date(s.currentIntervalStartAt).getTime() : null;
-          if (serverIntervalStart && serverIntervalStart >= shiftStartedAtMs && serverIntervalStart <= Date.now()) {
+            ? new Date(s.currentIntervalStartAt).getTime()
+            : null;
+          if (
+            serverIntervalStart &&
+            serverIntervalStart >= shiftStartedAtMs &&
+            serverIntervalStart <= Date.now()
+          ) {
             activityStartMs = serverIntervalStart;
           } else {
             activityStartMs = Date.now();
@@ -674,13 +621,12 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         agentState.activityStartMs = activityStartMs;
       }
 
-      // Watchdog: if we should be tracking (on shift, not on break, not idle,
-      // activityStartMs is set) but the screenshot interval has silently died
-      // (socket reconnect, edge-case stopScreenshots call, etc.), restart it.
-      // syncShiftState runs every 60s so any gap is self-healed within a minute.
+      // Watchdog: restart screenshot interval if it dies while on‑shift (not on break/idle, activityStartMs set); syncShiftState heals gaps within 60s.
       if (isNowTracking && activityStartMs !== null && !isScreenshotRunning()) {
         startScreenshots(API_URL, token);
-        agentState.nextScreenshotIn = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        agentState.nextScreenshotIn = new Date(
+          Date.now() + 10 * 60 * 1000,
+        ).toISOString();
       }
 
       broadcastState();
@@ -701,21 +647,10 @@ let activityCheckpointIntervalId: ReturnType<typeof setInterval> | null = null;
 const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
 
 /**
- * Commits the current active segment (activityStartMs → endAt) as a saved
- * ActivityInterval and folds its duration into todayTotalActiveMs. Used both
- * when the user goes idle AND by the periodic checkpoint below — without a
- * periodic checkpoint, a long continuous active stretch lives only in this
- * process's memory until it ends, so an unexpected tray restart (crash,
- * auto-update relaunch, forced quit) loses the entire stretch instead of
- * just the last few minutes since the last checkpoint.
- */
-/**
- * Returns true if the segment was committed (or there was nothing to commit /
- * it was too short to matter) — false only when the POST itself failed. Callers
- * that roll activityStartMs forward MUST check this return value: rolling
- * forward unconditionally after a failed commit silently discards that chunk
- * of time forever (the next checkpoint would start counting from the new,
- * later point instead of retrying the un-committed duration).
+ * Commit current active segment (activityStartMs → endAt) into todayTotalActiveMs.
+ * Ensures long continuous activity isn’t lost on crash/restart by periodic checkpoints.
+ * Returns true if committed or nothing to commit; false only if POST failed —
+ * callers must check before rolling activityStartMs forward to avoid discarding time.
  */
 const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
   if (activityStartMs === null) return true;
@@ -742,45 +677,20 @@ const startAgentServices = async (token: string) => {
 
   // Configure endpoint paths and screenshot mode based on auth mode
   const authMode = getAuthMode();
-  if (authMode === 'main') {
-    setHeartbeatPath('/api/timeclock/heartbeat');
+  if (authMode === "main") {
+    setHeartbeatPath("/api/timeclock/heartbeat");
     setSkipCaptures(true); // screenshots not yet supported for main-mode users
   } else {
-    setHeartbeatPath('/api/crm/timeproof/heartbeat');
-    // Admin-granted per-user exemption (CrmUser.screenshotExempt) — takes
-    // effect on next login/reconnect with a fresh token, same as other
-    // account-level fields, since we don't re-fetch /api/crm/me mid-session.
+    setHeartbeatPath("/api/crm/timeproof/heartbeat");
+    // Per-user screenshot exemption (CrmUser.screenshotExempt); applies only after next login/reconnect with fresh token, not mid-session.
     setSkipCaptures(!!agentState.user?.screenshotExempt);
   }
 
-  // Re-apply department-derived flags here too (not just in handleTrayAuth) —
-  // app.whenReady()'s "restore from store" startup path (every normal launch
-  // after the very first login, INCLUDING every auto-update relaunch) calls
-  // startAgentServices() directly with the cached user object and never goes
-  // through handleTrayAuth again. Since these two are plain module-level
-  // variables that default to false on every fresh process start, skipping
-  // this meant mainMonitorOnly/idleDetectionExempt silently reset to false on
-  // every restart for Web Dev users — screenshots quietly went back to
-  // capturing every monitor, and idle detection quietly turned back on —
-  // with nothing else wrong (heartbeat, shift tracking, etc. all looked
-  // normal), so there was no other signal that it had happened. (Confirmed
-  // in production: a Web Dev user went from 1 monitor to 2 immediately after
-  // the auto-update to 1.3.12 relaunched the app — the exact restart path
-  // this covers.)
   setMainMonitorOnly(!!agentState.user?.mainMonitorOnly);
   setIdleDetectionExempt(!!agentState.user?.idleDetectionExempt);
 
-  // macOS Screen Recording permission — the Mac build is unsigned (no Apple
-  // Developer certificate), so this permission does not reliably survive an
-  // auto-update: a user who granted it once can silently lose it again on
-  // the next update, with the tray otherwise heartbeating and running
-  // completely normally — no error, no visible symptom besides screenshots
-  // quietly stopping. Checked at startup and periodically; notifies once per
-  // loss (not every check) via a native OS notification, a persistent banner
-  // in the status window (see status.html), AND server-side (postHeartbeat
-  // reports this same value, which notifies the user's own bell/page and
-  // admins, and posts to Shift Alerts) — several channels so it isn't
-  // dependent on any single one being noticed.
+  // Re-apply department flags on startup (not just handleTrayAuth) so Web Dev users keep
+  // mainMonitorOnly/idleDetectionExempt across auto-update relaunches; otherwise they silently reset to false.
   const checkScreenRecordingPermission = () => {
     const granted = getScreenRecordingGranted();
     agentState.screenRecordingGranted = granted;
@@ -788,7 +698,7 @@ const startAgentServices = async (token: string) => {
       lastNotifiedScreenRecordingMissing = true;
       if (Notification.isSupported()) {
         new Notification({
-          title: 'Screen Recording permission needed',
+          title: "Screen Recording permission needed",
           body: 'Your screenshots have stopped. Click the tray icon and use "Fix Screen Recording" to re-enable it.',
           silent: false,
         }).show();
@@ -799,160 +709,127 @@ const startAgentServices = async (token: string) => {
     broadcastState();
   };
   checkScreenRecordingPermission();
-  screenRecordingCheckIntervalId = setInterval(checkScreenRecordingPermission, 5 * 60 * 1000);
+  screenRecordingCheckIntervalId = setInterval(
+    checkScreenRecordingPermission,
+    5 * 60 * 1000,
+  );
 
   // Notify the user when screen capture itself fails (upload failures are queued offline)
   setCaptureFailedCallback(() => {
     if (Notification.isSupported()) {
       new Notification({
-        title: 'Screenshot capture failed',
-        body: 'TimeProof could not capture your screen. Please check your screen recording permissions. Your admin may see a gap in your activity.',
+        title: "Screenshot capture failed",
+        body: "TimeProof could not capture your screen. Please check your screen recording permissions. Your admin may see a gap in your activity.",
         silent: false,
       }).show();
     }
   });
 
-  // Guard screenshots against break state — even if the tray misses a break-in
-  // socket event and stopScreenshots() is never called, the capture loop itself
-  // will skip every interval tick while the agent is on break.
+  // Guard screenshot loop against break state — skips capture ticks while on break, 
+  // even if break-in socket event was missed and stopScreenshots() wasn’t called.
   setOnBreakGetter(() => agentState.isOnBreak);
 
   // Proactively renew token every 10 hours (CRM mode only — main JWT is refreshed by the browser)
-  tokenRefreshIntervalId = authMode === 'crm' ? setInterval(async () => {
-    const current = store.get('crm_token') as string | undefined;
-    if (!current) return;
-    const refreshed = await tryRefreshToken(current);
-    if (!refreshed) {
-      handleLogout();
-      return;
-    }
-    // Propagate the renewed JWT everywhere it's used — previously only the
-    // store got the new token, so heartbeat and the socket kept using the
-    // old one until it eventually expired, silently breaking real-time sync
-    // and (once the old token expired outright) heartbeats too.
-    updateHeartbeatToken(refreshed);
-    updateSocketToken(refreshed);
-  }, TOKEN_REFRESH_INTERVAL_MS) : null;
+  tokenRefreshIntervalId =
+    authMode === "crm"
+      ? setInterval(async () => {
+          const current = store.get("crm_token") as string | undefined;
+          if (!current) return;
+          const refreshed = await tryRefreshToken(current);
+          if (!refreshed) {
+            handleLogout();
+            return;
+          }
+          updateHeartbeatToken(refreshed);
+          updateSocketToken(refreshed);
+        }, TOKEN_REFRESH_INTERVAL_MS)
+      : null;
 
-  startIdleMonitor(async (isIdle) => {
-    const wasIdle = agentState.isIdle;
-    agentState.isIdle = isIdle;
+  startIdleMonitor(
+    async (isIdle) => {
+      const wasIdle = agentState.isIdle;
+      agentState.isIdle = isIdle;
 
-    // Activity tracking only applies while the user is clocked in and not on break
-    const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
+      // Activity tracking only applies while the user is clocked in and not on break
+      const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
 
-    if (isIdle && !wasIdle) {
-      // User just went idle — save the completed active interval if we were counting.
-      // Truncate endAt to when the user last had input rather than using Date.now(),
-      // which would include sleep time if the computer just woke from suspension.
-      if (wasTracking && activityStartMs !== null) {
-        const idleSec = powerMonitor.getSystemIdleTime();
-        const endAt = new Date(Date.now() - idleSec * 1000);
-        await commitActiveSegment(endAt);
-        activityStartMs = null;
-        agentState.activityStartMs = null;
+      if (isIdle && !wasIdle) {
+        if (wasTracking && activityStartMs !== null) {
+          const idleSec = powerMonitor.getSystemIdleTime();
+          const endAt = new Date(Date.now() - idleSec * 1000);
+          await commitActiveSegment(endAt);
+          activityStartMs = null;
+          agentState.activityStartMs = null;
+        }
+        stopScreenshots();
+        agentState.nextScreenshotIn = null;
+
+        if (wasTracking) pingHeartbeat();
+
+        if (wasTracking && Notification.isSupported()) {
+          const flaggedIdleSec = powerMonitor.getSystemIdleTime();
+          const flaggedMin = Math.floor(flaggedIdleSec / 60);
+          const flaggedSec = flaggedIdleSec % 60;
+          new Notification({
+            title: "You are idle",
+            body: `No mouse/keyboard input detected for ${flaggedMin}m ${flaggedSec}s. Timer and screenshots paused.`,
+            silent: false,
+          }).show();
+        }
+
+        reportDiagnostic("idle_detected", "User flagged idle", {
+          idleSeconds: powerMonitor.getSystemIdleTime(),
+          idleSecondsHistory: getIdleSecondsHistory(),
+          platform: process.platform,
+          wasTracking,
+        });
+
+        if (
+          wasTracking &&
+          getAuthMode() === "crm" &&
+          !agentState.user?.screenshotExempt
+        ) {
+          const currentToken = store.get("crm_token") as string | undefined;
+          if (currentToken) {
+            captureAndUploadOnce(API_URL, currentToken).catch(() => {});
+          }
+        }
+      } else if (!isIdle && wasIdle) {
+        // User became active — resume only if clocked in and not on break
+        if (wasTracking) {
+          activityStartMs = Date.now();
+          agentState.activityStartMs = activityStartMs;
+          const currentToken = store.get("crm_token") as string | undefined;
+          if (currentToken && agentState.isAuthenticated) {
+            startScreenshots(API_URL, currentToken);
+            const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
+            agentState.nextScreenshotIn = new Date(nextIn).toISOString();
+          }
+          pingHeartbeat();
+        }
       }
-      stopScreenshots();
-      agentState.nextScreenshotIn = null;
 
-      // Immediately tell the server the interval has stopped (currentIntervalStartAt=null)
-      // so the CRM timer freezes in lock-step instead of lagging until the next 60s heartbeat.
-      if (wasTracking) pingHeartbeat();
-
-      if (wasTracking && Notification.isSupported()) {
-        // Includes the exact reading (not just "10+ minutes") so the user
-        // sees the same number an admin would if they ever dispute a flag —
-        // transparency here turns a "you're wrong" complaint into "here's
-        // specifically what the system measured, let's figure out why."
-        const flaggedIdleSec = powerMonitor.getSystemIdleTime();
-        const flaggedMin = Math.floor(flaggedIdleSec / 60);
-        const flaggedSec = flaggedIdleSec % 60;
-        new Notification({
-          title: 'You are idle',
-          body: `No mouse/keyboard input detected for ${flaggedMin}m ${flaggedSec}s. Timer and screenshots paused.`,
-          silent: false,
-        }).show();
-      }
-
-      // Users have repeatedly reported being flagged idle while they believe
-      // they were actively working — logs the OS's own raw idle-seconds
-      // reading (not just the derived boolean) so a future occurrence can be
-      // checked against what the OS actually reported, rather than relying on
-      // the user's recollection alone to tell a genuine input-detection quirk
-      // (wireless peripheral dropout, driver issue) apart from anything else.
-      reportDiagnostic('idle_detected', 'User flagged idle', {
-        idleSeconds: powerMonitor.getSystemIdleTime(),
-        // Recent readings (~30s apart) leading up to this flag — a clean
-        // climb toward the 600s threshold reads very differently from a
-        // sudden jump, which points to a sleep/wake or clock event rather
-        // than genuine gradual inactivity.
-        idleSecondsHistory: getIdleSecondsHistory(),
+      broadcastState();
+    },
+    (idleSeconds, exempt) => {
+      reportDiagnostic("idle_periodic_check", "Periodic idle-check trace", {
+        idleSeconds,
+        idleDetectionExempt: exempt,
+        isOnShift: agentState.isOnShift,
+        isOnBreak: agentState.isOnBreak,
         platform: process.platform,
-        wasTracking,
       });
+    },
+  );
 
-      // Evidence screenshot for "but I was moving!" disputes — paired on the
-      // admin side with whichever regular capture happened last before this
-      // (already-existing, unchanged) so a specific idle flag can be checked
-      // against what the screen actually looked like right before and right
-      // at the 10-minute mark. Deliberately last in this block and NOT
-      // awaited — commitActiveSegment/pingHeartbeat/the notification above
-      // are all time-sensitive (admin escalation timing depends on the
-      // heartbeat landing promptly) and must never wait on a screenshot
-      // upload. Guarded the same way the existing end-of-shift capture is
-      // (CRM mode only — main-mode/Lot Tech never takes screenshots at all)
-      // plus an explicit screenshotExempt check the existing call site
-      // doesn't have, so an individually-exempted account never gets one
-      // here either. Web Dev needs no separate check: idleDetectionExempt
-      // already keeps isIdle from ever becoming true for them, so this
-      // whole branch is already unreachable for that department.
-      if (wasTracking && getAuthMode() === 'crm' && !agentState.user?.screenshotExempt) {
-        const currentToken = store.get('crm_token') as string | undefined;
-        if (currentToken) {
-          captureAndUploadOnce(API_URL, currentToken).catch(() => {});
-        }
-      }
-    } else if (!isIdle && wasIdle) {
-      // User became active — resume only if clocked in and not on break
-      if (wasTracking) {
-        activityStartMs = Date.now();
-        agentState.activityStartMs = activityStartMs;
-        const currentToken = store.get('crm_token') as string | undefined;
-        if (currentToken && agentState.isAuthenticated) {
-          startScreenshots(API_URL, currentToken);
-          const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
-          agentState.nextScreenshotIn = new Date(nextIn).toISOString();
-        }
-        pingHeartbeat();
-      }
-    }
-
-    broadcastState();
-  }, (idleSeconds, exempt) => {
-    // Unconditional trace every ~5 minutes regardless of whether idle ever
-    // fires — otherwise a "detection never triggers" bug looks identical to
-    // "genuinely never idle" in the logs (both produce zero idle_detected
-    // reports). This turns silence into actual data: no periodic reports at
-    // all means the check loop itself isn't running; reports that show the
-    // number never climbing despite genuine inactivity means the OS isn't
-    // seeing input loss the way it should on this machine.
-    reportDiagnostic('idle_periodic_check', 'Periodic idle-check trace', {
-      idleSeconds,
-      idleDetectionExempt: exempt,
-      isOnShift: agentState.isOnShift,
-      isOnBreak: agentState.isOnBreak,
-      platform: process.platform,
-    });
-  });
-
-  // Periodic checkpoint: while actively tracking, commit the segment so far
-  // and roll the start point forward every 10 minutes. Without this, a long
-  // continuous active stretch (no idle gaps) is only ever committed when it
-  // ENDS — an unexpected tray restart mid-stretch (crash, auto-update
-  // relaunch, killed on sleep) loses everything since the last idle
-  // transition instead of just the last few minutes.
   activityCheckpointIntervalId = setInterval(async () => {
-    if (!agentState.isOnShift || agentState.isOnBreak || agentState.isIdle || activityStartMs === null) return;
+    if (
+      !agentState.isOnShift ||
+      agentState.isOnBreak ||
+      agentState.isIdle ||
+      activityStartMs === null
+    )
+      return;
     const now = new Date();
     const committed = await commitActiveSegment(now);
     // Only roll the start point forward if the commit actually succeeded —
@@ -980,11 +857,13 @@ const startAgentServices = async (token: string) => {
       return;
     }
     if (breakExceededNotified) return;
-    const breakSecs = Math.floor((Date.now() - new Date(agentState.breakStartedAt).getTime()) / 1000);
+    const breakSecs = Math.floor(
+      (Date.now() - new Date(agentState.breakStartedAt).getTime()) / 1000,
+    );
     if (breakSecs >= BREAK_WARNING_SECONDS && Notification.isSupported()) {
       breakExceededNotified = true;
       new Notification({
-        title: 'Break time exceeded',
+        title: "Break time exceeded",
         body: "You've gone over your 1-hour break. Please wrap up soon — your admin will be notified shortly if it continues.",
         silent: false,
       }).show();
@@ -1002,17 +881,26 @@ const startAgentServices = async (token: string) => {
   // the last check happened to run.
   autoClockoutTriggeredForThisIdleStretch = false;
   autoClockoutCheckIntervalId = setInterval(async () => {
-    if (!agentState.isOnShift || agentState.isOnBreak) { autoClockoutTriggeredForThisIdleStretch = false; return; }
+    if (!agentState.isOnShift || agentState.isOnBreak) {
+      autoClockoutTriggeredForThisIdleStretch = false;
+      return;
+    }
     const idleMs = powerMonitor.getSystemIdleTime() * 1000;
-    if (idleMs < AUTO_CLOCKOUT_IDLE_MS) { autoClockoutTriggeredForThisIdleStretch = false; return; }
+    if (idleMs < AUTO_CLOCKOUT_IDLE_MS) {
+      autoClockoutTriggeredForThisIdleStretch = false;
+      return;
+    }
     if (autoClockoutTriggeredForThisIdleStretch) return;
 
     autoClockoutTriggeredForThisIdleStretch = true;
-    const result = await performClockAction('time-out', 'Auto clock-out — 30+ minutes without activity');
+    const result = await performClockAction(
+      "time-out",
+      "Auto clock-out — 30+ minutes without activity",
+    );
     if (result.success && Notification.isSupported()) {
       new Notification({
-        title: 'Shift ended automatically',
-        body: 'You were inactive for 30+ minutes — your shift was clocked out. Click Resume if you\'re still working.',
+        title: "Shift ended automatically",
+        body: "You were inactive for 30+ minutes — your shift was clocked out. Click Resume if you're still working.",
         silent: false,
       }).show();
     }
@@ -1021,16 +909,26 @@ const startAgentServices = async (token: string) => {
   startHeartbeat(API_URL, token, () => {
     const isOnBreak = agentState.isOnBreak;
     const isOnShift = agentState.isOnShift;
-    const breakDurationSeconds = isOnBreak && agentState.breakStartedAt
-      ? Math.floor((Date.now() - new Date(agentState.breakStartedAt).getTime()) / 1000)
-      : 0;
+    const breakDurationSeconds =
+      isOnBreak && agentState.breakStartedAt
+        ? Math.floor(
+            (Date.now() - new Date(agentState.breakStartedAt).getTime()) / 1000,
+          )
+        : 0;
     // Report activityStartMs (this machine's clock). The CRM browser runs on the
     // same machine, so it computes (Date.now() - activityStartMs) in the SAME clock
     // domain → both timers match exactly. Reporting a server timestamp here would
     // mix the machine clock (CRM's Date.now()) with the server clock and surface
     // any clock skew as visible drift between the two displays.
-    const currentIntervalStartAt = activityStartMs ? new Date(activityStartMs).toISOString() : null;
-    return { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt };
+    const currentIntervalStartAt = activityStartMs
+      ? new Date(activityStartMs).toISOString()
+      : null;
+    return {
+      isOnBreak,
+      breakDurationSeconds,
+      isOnShift,
+      currentIntervalStartAt,
+    };
   });
 
   connectSocket(
@@ -1043,11 +941,18 @@ const startAgentServices = async (token: string) => {
       // Including activityStartMs !== null prevents "Shift Open — Tap Resume" state (isOnShift=true,
       // isOnBreak=false, activityStartMs=null) from being treated as wasTracking=true, which would
       // cause break-out events to be a no-op (both wasTracking and isNowTracking stay true → no transition fires).
-      const wasTracking = prevIsOnShift && !prevIsOnBreak && !agentState.isIdle && activityStartMs !== null;
+      const wasTracking =
+        prevIsOnShift &&
+        !prevIsOnBreak &&
+        !agentState.isIdle &&
+        activityStartMs !== null;
       // Detect a break-out event specifically so we can force-resume when the tray was in
       // "Tap Resume" state (activityStartMs=null, isOnBreak already false locally) and thus
       // prevIsOnBreak=false — meaning justEndedBreak would be false, but we still need to resume.
-      const isBreakOutEvent = 'isOnBreak' in partial && (partial as { isOnBreak: boolean }).isOnBreak === false && !('isOnShift' in partial);
+      const isBreakOutEvent =
+        "isOnBreak" in partial &&
+        (partial as { isOnBreak: boolean }).isOnBreak === false &&
+        !("isOnShift" in partial);
 
       agentState = { ...agentState, ...partial };
       agentState.isAgentOnline = true;
@@ -1057,35 +962,48 @@ const startAgentServices = async (token: string) => {
       // itself (the accumulated figure) still only refreshes on that poll,
       // so a resumed session may briefly over/undercount until the next one,
       // same self-correcting tolerance as the rest of this mechanism.
-      wallClockBaseAt = (agentState.isOnShift && !agentState.isOnBreak) ? Date.now() : null;
+      wallClockBaseAt =
+        agentState.isOnShift && !agentState.isOnBreak ? Date.now() : null;
       agentState.wallClockBaseAt = wallClockBaseAt;
 
       // Capture whether shift/break state changed BEFORE tracking transitions so we
       // can call pingHeartbeat() AFTER activityStartMs is correctly set/cleared.
-      const shiftStateChanged = agentState.isOnBreak !== prevIsOnBreak || agentState.isOnShift !== prevIsOnShift;
+      const shiftStateChanged =
+        agentState.isOnBreak !== prevIsOnBreak ||
+        agentState.isOnShift !== prevIsOnShift;
 
       if (prevIsOnBreak && !agentState.isOnBreak) {
         breakExceededNotified = false;
       }
 
-      const isNowTracking = agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle;
+      const isNowTracking =
+        agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle;
 
       if (wasTracking && !isNowTracking) {
         // Clocked out or went on break — save the current active interval (fire-and-forget)
         if (activityStartMs !== null) {
           const endAt = new Date();
           const durationMs = endAt.getTime() - activityStartMs;
-          const currentToken = store.get('crm_token') as string | undefined;
+          const currentToken = store.get("crm_token") as string | undefined;
           if (currentToken && durationMs >= 30_000) {
-            axios.post(
-              `${API_URL}${getActivityIntervalUrl()}`,
-              { startAt: new Date(activityStartMs).toISOString(), endAt: endAt.toISOString() },
-              { headers: { Authorization: `Bearer ${currentToken}` }, timeout: 10_000 }
-            ).then(() => {
-              todayTotalActiveMs += durationMs;
-              agentState.todayTotalActiveMs = todayTotalActiveMs;
-              broadcastState();
-            }).catch(() => {});
+            axios
+              .post(
+                `${API_URL}${getActivityIntervalUrl()}`,
+                {
+                  startAt: new Date(activityStartMs).toISOString(),
+                  endAt: endAt.toISOString(),
+                },
+                {
+                  headers: { Authorization: `Bearer ${currentToken}` },
+                  timeout: 10_000,
+                },
+              )
+              .then(() => {
+                todayTotalActiveMs += durationMs;
+                agentState.todayTotalActiveMs = todayTotalActiveMs;
+                broadcastState();
+              })
+              .catch(() => {});
           }
           activityStartMs = null;
           agentState.activityStartMs = null;
@@ -1102,12 +1020,18 @@ const startAgentServices = async (token: string) => {
         // older unclosed shift) — that's what the "Shift Open — Tap Resume" state is for.
         const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
         const shiftStartedAtMs = agentState.shiftStartedAt
-          ? new Date(agentState.shiftStartedAt).getTime() : 0;
-        const shiftStartedRecently = shiftStartedAtMs > 0
-          && (Date.now() - shiftStartedAtMs) < SHIFT_AUTO_RESUME_MS;
+          ? new Date(agentState.shiftStartedAt).getTime()
+          : 0;
+        const shiftStartedRecently =
+          shiftStartedAtMs > 0 &&
+          Date.now() - shiftStartedAtMs < SHIFT_AUTO_RESUME_MS;
         const justEndedBreak = prevIsOnBreak && !agentState.isOnBreak;
 
-        if (justEndedBreak || shiftStartedRecently || (isBreakOutEvent && activityStartMs === null)) {
+        if (
+          justEndedBreak ||
+          shiftStartedRecently ||
+          (isBreakOutEvent && activityStartMs === null)
+        ) {
           activityStartMs = Date.now();
           agentState.activityStartMs = activityStartMs;
           const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
@@ -1125,7 +1049,9 @@ const startAgentServices = async (token: string) => {
       broadcastState();
       flushQueue(API_URL, token).catch(() => {});
     },
-    () => { syncShiftState(token); },
+    () => {
+      syncShiftState(token);
+    },
     () => {
       if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
     },
@@ -1146,15 +1072,18 @@ const startAgentServices = async (token: string) => {
   // events (break-in, break-out, time-out) self-correct within one minute
   // rather than waiting the old 5-minute window.
   resyncIntervalId = setInterval(() => {
-    const currentToken = store.get('crm_token') as string | undefined;
+    const currentToken = store.get("crm_token") as string | undefined;
     if (currentToken) syncShiftState(currentToken);
   }, 60 * 1000);
 
   // Poll for active call state every 10s — drives recording/Autrix menu visibility
   startCallStatePolling(
     API_URL,
-    () => store.get('crm_token') as string | undefined,
-    (_call) => { tray?.setContextMenu(buildTrayMenu()); broadcastState(); },
+    () => store.get("crm_token") as string | undefined,
+    (_call) => {
+      tray?.setContextMenu(buildTrayMenu());
+      broadcastState();
+    },
   );
 
   // Real-time socket — receives tray:start-recording / tray:stop-recording from backend

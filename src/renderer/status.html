@@ -613,12 +613,9 @@
       return name.split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
     };
 
-    // Work timer: driven by the authoritative wall-clock baseline (same
-    // TimeLog-based figure behind the CRM's Today card), not the
-    // activityStartMs/todayTotalActiveMs pair — that pair repeatedly reset or
-    // froze after a failed checkpoint, stale heartbeat, or idle-detection
-    // flap. wallClockBaseMs is fetched fresh every sync; wallClockBaseAt just
-    // marks when, so the client ticks the gap in between.
+    // Work timer uses wall‑clock baseline (TimeLog) instead of activityStartMs/todayTotalActiveMs,
+    // since those can reset or freeze after failed checkpoints or idle flaps.
+    // wallClockBaseMs is refreshed each sync; wallClockBaseAt marks when, so client ticks the gap.
     const updateWorkTimer = () => {
       const prevMs = state.wallClockBaseMs || 0;
       const liveMs = state.wallClockBaseAt
@@ -811,15 +808,10 @@
 
     const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
-    // Must match updateWorkTimer's formula above (and main.ts's
-    // getRenderedMsSoFar) exactly — this used to read state.todayTotalActiveMs
-    // / state.activityStartMs instead, the exact under-reporting-prone pair
-    // both of those already deliberately avoid. Nothing else read from that
-    // pair, so the visible countdown always showed the correct rendered
-    // hours while THIS check (whether End Shift needs the early-end reason
-    // modal) was silently judging against a stale, much smaller number —
-    // e.g. only the time since the last idle-to-active transition, not the
-    // whole shift.
+    // Must match updateWorkTimer's formula (and main.ts getRenderedMsSoFar) exactly.
+// Avoids under-reporting from state.todayTotalActiveMs/state.activityStartMs,
+// which only tracked time since last idle→active transition. Ensures End Shift
+// modal check uses full rendered hours, same as visible countdown.
     const getWorkedMs = () => {
       const prevMs = state.wallClockBaseMs || 0;
       const liveMs = state.wallClockBaseAt ? Math.max(0, Date.now() - state.wallClockBaseAt) : 0;
