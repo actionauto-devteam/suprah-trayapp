@@ -5,6 +5,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { getIsIdle } from './idle';
 import { enqueue, flushQueue } from './offline-queue';
+import { getScreenRecordingGranted } from './permissions';
 
 const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const CAPTURE_FAIL_COOLDOWN_MS = 30 * 60 * 1000; // notify at most once per 30 min
@@ -94,6 +95,30 @@ const toShiftDate = () => {
   const mdt = new Date(Date.now() + MDT_OFFSET_MS);
   return `${mdt.getUTCFullYear()}-${String(mdt.getUTCMonth() + 1).padStart(2, '0')}-${String(mdt.getUTCDate()).padStart(2, '0')}`;
 };
+
+// Records a "we would have captured here, but macOS blocked it" marker for
+// this 10-minute slot instead of leaving it a silent, unexplained gap in the
+// admin's timeline. Hits a dedicated endpoint (submitScreenshotPlaceholder)
+// that shares no code with the real screenshot upload path, so a bug here
+// can never affect captures that ARE working. Counts toward
+// lastCaptureOutcomeAt the same as a real capture/queue write — the watchdog
+// exists to catch a genuinely wedged capture loop, not to keep restarting an
+// interval that's behaving exactly as it should given the OS is blocking it.
+async function reportScreenshotPlaceholder(): Promise<void> {
+  if (!apiUrl || !token) return;
+  try {
+    await axios.post(
+      `${apiUrl}/api/crm/timeproof/screenshots/placeholder`,
+      { shiftDate: toShiftDate(), capturedAt: new Date().toISOString(), reason: 'screen-recording-permission-missing' },
+      { headers: { Authorization: `Bearer ${token}` }, timeout: 30_000 },
+    );
+    lastCaptureOutcomeAt = Date.now();
+  } catch {
+    // Best-effort — same as a real capture's upload failure, the offline
+    // queue exists for actual screenshots, not worth building a parallel
+    // retry path just for this marker.
+  }
+}
 
 /**
  * Captures all connected monitors and stitches them horizontally into a single JPEG.
@@ -186,6 +211,18 @@ async function captureAllScreens(): Promise<Buffer | null> {
 async function captureAndUpload(): Promise<void> {
   // Skip regular interval captures while idle, on break, or in skip mode (e.g. main-auth users)
   if (skipCaptures || getIsIdle() || getIsOnBreak()) return;
+
+  // macOS only, and only when the OS has explicitly confirmed the permission
+  // is off (false) — never on Windows or when the check itself is uncertain
+  // (null), both of which fall through unchanged to the real capture attempt
+  // below exactly as before this was added. A real capture attempt here
+  // would be doomed anyway (the OS blocks it outright), so this reports a
+  // placeholder and skips straight past captureAllScreens() instead of
+  // silently leaving this whole 10-minute slot with no record at all.
+  if (process.platform === 'darwin' && getScreenRecordingGranted() === false) {
+    await reportScreenshotPlaceholder();
+    return;
+  }
 
   try {
     const jpegBuffer = await captureAllScreens();

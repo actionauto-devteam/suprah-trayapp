@@ -811,9 +811,18 @@
 
     const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
+    // Must match updateWorkTimer's formula above (and main.ts's
+    // getRenderedMsSoFar) exactly — this used to read state.todayTotalActiveMs
+    // / state.activityStartMs instead, the exact under-reporting-prone pair
+    // both of those already deliberately avoid. Nothing else read from that
+    // pair, so the visible countdown always showed the correct rendered
+    // hours while THIS check (whether End Shift needs the early-end reason
+    // modal) was silently judging against a stale, much smaller number —
+    // e.g. only the time since the last idle-to-active transition, not the
+    // whole shift.
     const getWorkedMs = () => {
-      const prevMs = state.todayTotalActiveMs || 0;
-      const liveMs = state.activityStartMs ? Math.max(0, Date.now() - state.activityStartMs) : 0;
+      const prevMs = state.wallClockBaseMs || 0;
+      const liveMs = state.wallClockBaseAt ? Math.max(0, Date.now() - state.wallClockBaseAt) : 0;
       return prevMs + liveMs;
     };
 
