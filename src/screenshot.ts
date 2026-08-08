@@ -274,10 +274,12 @@ async function captureAndUpload(): Promise<void> {
 }
 
 /**
- * Captures one screenshot and uploads it with idleDetected=true.
- * Called once when the user goes idle so admin gets a snapshot of what was on screen.
+ * Captures one screenshot and uploads it. `idleDetected` defaults to true for
+ * the original caller (fires once when the user goes idle, so admin gets a
+ * snapshot of what was on screen) — callers capturing for another reason
+ * (e.g. a proof-of-work shot at clock-out) should pass the real current state.
  */
-export async function captureAndUploadOnce(url: string, authToken: string): Promise<void> {
+export async function captureAndUploadOnce(url: string, authToken: string, idleDetected: boolean = true): Promise<void> {
   try {
     const jpegBuffer = await captureAllScreens();
     if (!jpegBuffer) return;
@@ -286,7 +288,7 @@ export async function captureAndUploadOnce(url: string, authToken: string): Prom
     form.append('screenshot', jpegBuffer, { filename: `${Date.now()}.jpg`, contentType: 'image/jpeg' });
     form.append('shiftDate', toShiftDate());
     form.append('capturedAt', new Date().toISOString());
-    form.append('idleDetected', 'true');
+    form.append('idleDetected', String(idleDetected));
 
     await axios.post(`${url}/api/crm/timeproof/screenshots`, form, {
       headers: { ...form.getHeaders(), Authorization: `Bearer ${authToken}` },

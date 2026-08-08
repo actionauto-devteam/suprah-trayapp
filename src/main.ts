@@ -1199,9 +1199,11 @@ const performClockAction = async (type: string, note?: string): Promise<{ succes
   const token = store.get('crm_token') as string | undefined;
   if (!token) return { success: false, error: 'Not authenticated' };
   try {
-    // Capture a screenshot before ending shift (CRM mode only — main mode skips screenshots)
+    // Capture a screenshot before ending shift (CRM mode only — main mode skips screenshots).
+    // Reflect the real idle state instead of the function's idle-only default, otherwise
+    // every end-shift screenshot got mislabeled "idle" even when the user was active.
     if (type === 'time-out' && getAuthMode() === 'crm') {
-      captureAndUploadOnce(API_URL, token).catch(() => {});
+      captureAndUploadOnce(API_URL, token, agentState.isIdle).catch(() => {});
     }
     await axios.post(`${API_URL}${getClockUrl()}`, { type, ...(note && { note }) }, {
       headers: { Authorization: `Bearer ${token}` },
