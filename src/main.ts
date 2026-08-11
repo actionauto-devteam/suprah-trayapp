@@ -750,11 +750,13 @@ const startAgentServices = async (token: string) => {
       const wasIdle = agentState.isIdle;
       agentState.isIdle = isIdle;
 
-      // Activity tracking only applies while the user is clocked in and not on break
+      // Clocked in and not on break — used as-is by the resume branch below.
       const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
+      // Same, but also requires an actual open segment — skips false "went idle" side-effects during "Tap Resume" limbo.
+      const hadOpenSegment = wasTracking && activityStartMs !== null;
 
       if (isIdle && !wasIdle) {
-        if (wasTracking && activityStartMs !== null) {
+        if (hadOpenSegment) {
           const idleSec = powerMonitor.getSystemIdleTime();
           const endAt = new Date(Date.now() - idleSec * 1000);
           await commitActiveSegment(endAt);
@@ -764,9 +766,9 @@ const startAgentServices = async (token: string) => {
         stopScreenshots();
         agentState.nextScreenshotIn = null;
 
-        if (wasTracking) pingHeartbeat();
+        if (hadOpenSegment) pingHeartbeat();
 
-        if (wasTracking && Notification.isSupported()) {
+        if (hadOpenSegment && Notification.isSupported()) {
           const flaggedIdleSec = powerMonitor.getSystemIdleTime();
           const flaggedMin = Math.floor(flaggedIdleSec / 60);
           const flaggedSec = flaggedIdleSec % 60;
@@ -777,15 +779,17 @@ const startAgentServices = async (token: string) => {
           }).show();
         }
 
-        reportDiagnostic("idle_detected", "User flagged idle", {
-          idleSeconds: powerMonitor.getSystemIdleTime(),
-          idleSecondsHistory: getIdleSecondsHistory(),
-          platform: process.platform,
-          wasTracking,
-        });
+        if (hadOpenSegment) {
+          reportDiagnostic("idle_detected", "User flagged idle", {
+            idleSeconds: powerMonitor.getSystemIdleTime(),
+            idleSecondsHistory: getIdleSecondsHistory(),
+            platform: process.platform,
+            wasTracking,
+          });
+        }
 
         if (
-          wasTracking &&
+          hadOpenSegment &&
           getAuthMode() === "crm" &&
           !agentState.user?.screenshotExempt
         ) {
