@@ -750,9 +750,16 @@ const startAgentServices = async (token: string) => {
       const wasIdle = agentState.isIdle;
       agentState.isIdle = isIdle;
 
-      // Clocked in and not on break — used as-is by the resume branch below.
+      // Activity tracking only applies while the user is clocked in and not on break.
+      // Deliberately NOT checking activityStartMs here — the "became active" branch
+      // below needs wasTracking to stay true even when activityStartMs is null
+      // (that's exactly the case it exists to repopulate).
       const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
-      // Same, but also requires an actual open segment — skips false "went idle" side-effects during "Tap Resume" limbo.
+      // Whether there was an actual open activity segment to interrupt — false in
+      // the "Shift Open — Tap Resume" limbo state (activityStartMs already null),
+      // where nothing is genuinely running yet. Scoped to the "going idle"
+      // side-effects below only, so they stop firing a false "went idle" signal
+      // for a segment that was never open, matching commitActiveSegment's own gate.
       const hadOpenSegment = wasTracking && activityStartMs !== null;
 
       if (isIdle && !wasIdle) {
