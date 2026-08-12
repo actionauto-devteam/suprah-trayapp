@@ -49,6 +49,16 @@ export function setOnBreakGetter(fn: () => boolean): void {
   getIsOnBreak = fn;
 }
 
+// Mirrors updateHeartbeatToken/updateSocketToken — without this, a token captured once at
+// the first startScreenshots() call (blocked from ever refreshing by the intervalId guard
+// below) goes stale once the JWT expires (12h), silently failing every upload as 401 and
+// misclassifying it as "offline" forever, while heartbeat/socket keep working fine on their
+// own live-refreshed tokens. This is what made screenshots alone stop despite no real
+// connection loss and the timer continuing normally.
+export function updateScreenshotToken(newToken: string): void {
+  token = newToken;
+}
+
 // Reports otherwise-invisible local failures to the backend (persisted via
 // the existing logger, queryable by userId same as any server log) — the
 // tray runs hidden with no visible console, so without this there was no way
@@ -95,6 +105,44 @@ const toShiftDate = () => {
   const mdt = new Date(Date.now() + MDT_OFFSET_MS);
   return `${mdt.getUTCFullYear()}-${String(mdt.getUTCMonth() + 1).padStart(2, '0')}-${String(mdt.getUTCDate()).padStart(2, '0')}`;
 };
+
+// Small on-screen indication of how many screenshots have actually gone through today —
+// persisted to disk so a tray restart mid-day (auto-update, crash, manual restart) resumes
+// the count instead of dropping back to 0.
+const COUNT_FILE = path.join(app.getPath('userData'), 'screenshot-count.json');
+let todayCount = 0;
+let todayCountDate = '';
+let captureSucceededCb: ((count: number) => void) | null = null;
+
+export function setCaptureSucceededCallback(cb: (count: number) => void): void {
+  captureSucceededCb = cb;
+}
+
+function loadTodayCount(): void {
+  const currentDate = toShiftDate();
+  try {
+    const raw = JSON.parse(fs.readFileSync(COUNT_FILE, 'utf-8')) as { date: string; count: number };
+    todayCount = raw.date === currentDate ? raw.count : 0;
+  } catch {
+    todayCount = 0;
+  }
+  todayCountDate = currentDate;
+}
+
+function bumpTodayCount(by: number = 1): void {
+  if (by <= 0) return;
+  const currentDate = toShiftDate();
+  if (todayCountDate !== currentDate) {
+    todayCount = 0;
+    todayCountDate = currentDate;
+  }
+  todayCount += by;
+  try {
+    fs.writeFileSync(COUNT_FILE, JSON.stringify({ date: todayCountDate, count: todayCount }));
+  } catch {
+  }
+  captureSucceededCb?.(todayCount);
+}
 
 // Records a "we would have captured here, but macOS blocked it" marker for
 // this 10-minute slot instead of leaving it a silent, unexplained gap in the
@@ -208,10 +256,39 @@ async function captureAllScreens(): Promise<Buffer | null> {
   return combined.toJPEG(75);
 }
 
+// Guards against a new interval tick overlapping a still-running previous one — without
+// this, a long stretch of failed uploads (each retry attempt waiting out its own timeout
+// across a growing offline-queue backlog) could let two captureAndUpload calls race on
+// screenshot-queue.json's read-modify-write, silently dropping whatever the second call
+// enqueued when the first call's stale snapshot overwrites the file on its own eventual save.
+let captureInFlight: Promise<void> | null = null;
+
+/** Lets the auto-updater wait out any in-progress capture/upload before quitAndInstall —
+ * otherwise a screenshot mid-upload (still only in memory, not yet queued to disk) is lost
+ * outright when the process is killed underneath it. */
+export async function waitForCaptureToFinish(): Promise<void> {
+  if (captureInFlight) {
+    try {
+      await captureInFlight;
+    } catch {
+    }
+  }
+}
+
 async function captureAndUpload(): Promise<void> {
   // Skip regular interval captures while idle, on break, or in skip mode (e.g. main-auth users)
   if (skipCaptures || getIsIdle() || getIsOnBreak()) return;
+  if (captureInFlight) return; // previous cycle still finishing — skip this tick instead of overlapping
 
+  captureInFlight = runCaptureAndUpload();
+  try {
+    await captureInFlight;
+  } finally {
+    captureInFlight = null;
+  }
+}
+
+async function runCaptureAndUpload(): Promise<void> {
   // macOS only, and only when the OS has explicitly confirmed the permission
   // is off (false) — never on Windows or when the check itself is uncertain
   // (null), both of which fall through unchanged to the real capture attempt
@@ -233,7 +310,8 @@ async function captureAndUpload(): Promise<void> {
 
     // Try direct upload first
     try {
-      await flushQueue(apiUrl, token); // drain any queued items first
+      const flushed = await flushQueue(apiUrl, token); // drain any queued items first
+      if (flushed > 0) bumpTodayCount(flushed);
 
       const form = new FormData();
       form.append('screenshot', jpegBuffer, {
@@ -249,6 +327,7 @@ async function captureAndUpload(): Promise<void> {
         timeout: 30_000,
       });
       lastCaptureOutcomeAt = Date.now();
+      bumpTodayCount();
     } catch {
       // No internet — save locally and queue for later
       const localDir = path.join(app.getPath('userData'), 'screenshot-cache', shiftDate);
@@ -294,12 +373,14 @@ export async function captureAndUploadOnce(url: string, authToken: string, idleD
       headers: { ...form.getHeaders(), Authorization: `Bearer ${authToken}` },
       timeout: 30_000,
     });
+    bumpTodayCount();
   } catch {
     // Silent fail — best-effort idle snapshot
   }
 }
 
 export function startScreenshots(url: string, authToken: string): void {
+  loadTodayCount();
   if (intervalId) return;
   apiUrl = url;
   token = authToken;

@@ -482,6 +482,15 @@
         <span class="timer-label">Total Break</span>
         <span class="timer-value break" id="breakTimer">--:--:--</span>
       </div>
+      <div class="timer-row">
+        <span class="timer-label" title="Screenshots Today" style="display:inline-flex; align-items:center;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+            <circle cx="12" cy="13" r="4"></circle>
+          </svg>
+        </span>
+        <span class="timer-value" id="screenshotCount">0</span>
+      </div>
     </div>
 
     <!-- Call section (shown when activeCall is present) -->
@@ -657,6 +666,8 @@
         updateButtons(s);
         return;
       }
+
+      document.getElementById('screenshotCount').textContent = s.screenshotsToday ?? 0;
 
       // Avatar + name
       document.getElementById('avatar').textContent = initials(s.user?.fullName);

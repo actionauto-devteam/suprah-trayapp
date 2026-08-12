@@ -38,6 +38,10 @@ autoUpdater.on('update-downloaded', () => {
     if (activityStartMs !== null) {
       await commitActiveSegment(new Date());
     }
+    // A screenshot mid-upload only exists in memory until the request succeeds — killing the
+    // process here (before this wait was added) silently dropped it with no queue entry to
+    // recover it from, unlike a normal offline failure which does get saved to disk first.
+    await waitForCaptureToFinish();
     autoUpdater.quitAndInstall(true, true);
   }, 10_000);
 });
@@ -50,7 +54,7 @@ dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
 import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic } from './screenshot';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, waitForCaptureToFinish } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
 import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
@@ -111,6 +115,7 @@ interface AgentState {
   shiftStartedAt: string | null;
   breakStartedAt: string | null;
   nextScreenshotIn: string | null;
+  screenshotsToday: number;
   totalBreakSeconds: number;
   todayTotalWorkedSeconds: number;
   // Activity-based tracking (idle-aware timer)
@@ -168,6 +173,7 @@ let agentState: AgentState = {
   shiftStartedAt: null,
   breakStartedAt: null,
   nextScreenshotIn: null,
+  screenshotsToday: 0,
   totalBreakSeconds: 0,
   todayTotalWorkedSeconds: 0,
   activityStartMs: null,
@@ -725,6 +731,13 @@ const startAgentServices = async (token: string) => {
     }
   });
 
+  // Small on-screen count so the user can see for themselves how many screenshots have
+  // actually gone through today, instead of just trusting the timer kept ticking.
+  setCaptureSucceededCallback((count) => {
+    agentState.screenshotsToday = count;
+    broadcastState();
+  });
+
   // Guard screenshot loop against break state — skips capture ticks while on break, 
   // even if break-in socket event was missed and stopScreenshots() wasn’t called.
   setOnBreakGetter(() => agentState.isOnBreak);
@@ -1061,7 +1074,10 @@ const startAgentServices = async (token: string) => {
       flushQueue(API_URL, token).catch(() => {});
     },
     () => {
-      syncShiftState(token);
+      // Read live — this callback outlives the initial login and must not resync
+      // using the first-login token forever if it's since rotated for the same user.
+      const currentToken = store.get('crm_token') as string | undefined;
+      if (currentToken) syncShiftState(currentToken);
     },
     () => {
       if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
@@ -1166,6 +1182,7 @@ const handleLogout = async () => {
     shiftStartedAt: null,
     breakStartedAt: null,
     nextScreenshotIn: null,
+    screenshotsToday: 0,
     totalBreakSeconds: 0,
     todayTotalWorkedSeconds: 0,
     activityStartMs: null,
@@ -1306,6 +1323,7 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   if (agentState.isAuthenticated && store.get('crm_token') === token) return true;
 
   const wasAuthenticated = agentState.isAuthenticated;
+  const trackedUsername = agentState.user?.username;
   let user: User | null = null;
   let authMode: 'crm' | 'main' = 'crm';
 
@@ -1340,6 +1358,19 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
 
   if (!user?.fullName) return false;
 
+  // A different browser tab logged into a different account and auto-pushed its token to
+  // this tray (TrayAutoConnect runs on every page load, for any account) — while a shift is
+  // actively open, reject the handoff instead of silently switching identity mid-shift. This
+  // was the root cause of several "sudden auto clock-out despite being active" reports: the
+  // hijacked user's heartbeats went out under the new identity, so their real shift went
+  // silent and got auto-closed hours later by the stale-heartbeat scheduler.
+  if (wasAuthenticated && agentState.isOnShift && trackedUsername && trackedUsername !== user.username) {
+    reportDiagnostic('tray_auth_rejected_different_user', 'Rejected auth handoff to a different user while on shift', {
+      trackedUsername, incomingUsername: user.username,
+    });
+    return false;
+  }
+
   agentState.isAuthenticated = true;
   agentState.user = user;
   agentState.isAgentOnline = true;
@@ -1349,6 +1380,7 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   store.set('auth_mode', authMode);
   store.set('user', user);
   updateHeartbeatToken(token); // keep heartbeat JWT in sync when page sends a refreshed token
+  updateScreenshotToken(token); // same — screenshot uploads used to silently go stale at the 12h JWT expiry
   // startAgentServices (and its connectSocket call) only runs on the FIRST
   // auth — a refreshed token arriving while already authenticated used to
   // never reach the socket, leaving it running on the original (eventually

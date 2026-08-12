@@ -32,11 +32,13 @@ export function enqueue(entry: QueueEntry): void {
   saveQueue(queue);
 }
 
-export async function flushQueue(apiUrl: string, token: string): Promise<void> {
+/** Returns the number of queued screenshots successfully uploaded this call. */
+export async function flushQueue(apiUrl: string, token: string): Promise<number> {
   const queue = loadQueue();
-  if (queue.length === 0) return;
+  if (queue.length === 0) return 0;
 
   const remaining: QueueEntry[] = [];
+  let uploaded = 0;
 
   for (const entry of queue) {
     try {
@@ -57,10 +59,12 @@ export async function flushQueue(apiUrl: string, token: string): Promise<void> {
       });
 
       fs.unlinkSync(entry.filePath); // clean up local copy after upload
+      uploaded++;
     } catch {
       remaining.push(entry); // retry next time
     }
   }
 
   saveQueue(remaining);
+  return uploaded;
 }
