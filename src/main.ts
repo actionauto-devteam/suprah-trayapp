@@ -501,7 +501,11 @@ const tryRefreshToken = async (token: string): Promise<string | null> => {
   }
 };
 
+let lastSyncFailReportedAt = 0;
+const SYNC_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
+
 const syncShiftState = async (token: string, retries = 3): Promise<void> => {
+  let lastErr: unknown = null;
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       const { data } = await axios.get(`${API_URL}${getShiftStateUrl()}`, {
@@ -637,7 +641,8 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
 
       broadcastState();
       return;
-    } catch {
+    } catch (err) {
+      lastErr = err;
       if (attempt < retries) {
         // Wait 3s before retrying so transient network hiccups don't leave
         // the tray showing "Not Clocked In" when the user is actually on shift
@@ -645,7 +650,17 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       }
     }
   }
-  // All retries failed — socket events will eventually correct the state
+  // All retries failed — socket events will eventually correct the state, but this used to
+  // leave zero trace of why. Throttled report so a genuine extended outage doesn't spam.
+  const now = Date.now();
+  if (now - lastSyncFailReportedAt > SYNC_FAIL_REPORT_COOLDOWN_MS) {
+    lastSyncFailReportedAt = now;
+    const axiosErr = lastErr as { response?: { status?: number }; message?: string };
+    reportDiagnostic('sync_shift_state_failed', 'syncShiftState exhausted all retries', {
+      status: axiosErr?.response?.status ?? null,
+      message: axiosErr?.message ?? String(lastErr),
+    });
+  }
 };
 
 let tokenRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -658,6 +673,9 @@ const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
  * Returns true if committed or nothing to commit; false only if POST failed —
  * callers must check before rolling activityStartMs forward to avoid discarding time.
  */
+let lastCheckpointFailReportedAt = 0;
+const CHECKPOINT_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
+
 const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
   if (activityStartMs === null) return true;
   const currentToken = store.get('crm_token') as string | undefined;
@@ -672,7 +690,16 @@ const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
     todayTotalActiveMs += durationMs;
     agentState.todayTotalActiveMs = todayTotalActiveMs;
     return true;
-  } catch {
+  } catch (err) {
+    const now = Date.now();
+    if (now - lastCheckpointFailReportedAt > CHECKPOINT_FAIL_REPORT_COOLDOWN_MS) {
+      lastCheckpointFailReportedAt = now;
+      const axiosErr = err as { response?: { status?: number }; message?: string };
+      reportDiagnostic('activity_checkpoint_failed', 'Activity-interval checkpoint POST failed', {
+        status: axiosErr?.response?.status ?? null,
+        message: axiosErr?.message ?? String(err),
+      });
+    }
     return false;
   }
 };
