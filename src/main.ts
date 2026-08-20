@@ -330,6 +330,9 @@ const positionStatusWindow = () => {
   statusWindow.setPosition(Math.round(width - 316), Math.round(height - STATUS_HEIGHT_BASE - 16));
 };
 
+// Tracks the in-flight loadFile() call so showStatusWindow can wait for it — see its comment.
+let statusWindowLoadPromise: Promise<void> | null = null;
+
 const createStatusWindow = () => {
   statusWindow = new BrowserWindow({
     width: 300,
@@ -348,9 +351,22 @@ const createStatusWindow = () => {
   });
 
   positionStatusWindow();
-  statusWindow.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'status.html'));
+  // loadFile() used to be fire-and-forget, with showStatusWindow calling .show() on the very
+  // next synchronous line — on a slow or antivirus-throttled disk read, .show() could fire
+  // before this resolves. Since the window is transparent, an unpainted transparent window is
+  // fully invisible — indistinguishable from the tray icon click doing nothing at all. Track
+  // the promise so showStatusWindow can wait for it, and report a diagnostic on genuine
+  // failure instead of it vanishing into an unhandled rejection with zero trace.
+  const win = statusWindow;
+  statusWindowLoadPromise = win.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'status.html'))
+    .then(() => {})
+    .catch((err) => {
+      reportDiagnostic('status_window_load_failed', 'Status window failed to load its content', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   statusWindow.on('blur', () => statusWindow?.hide());
-  statusWindow.on('closed', () => { statusWindow = null; });
+  statusWindow.on('closed', () => { statusWindow = null; statusWindowLoadPromise = null; });
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -471,8 +487,17 @@ const handleStopRecording = () => {
   }).catch(() => {});
 };
 
-const showStatusWindow = () => {
-  if (!statusWindow || statusWindow.isDestroyed()) createStatusWindow();
+const showStatusWindow = async () => {
+  const isFreshWindow = !statusWindow || statusWindow.isDestroyed();
+  if (isFreshWindow) createStatusWindow();
+  // On a freshly-created window, wait for its content to actually finish loading before
+  // showing it — otherwise .show() can fire on a still-blank transparent window (see
+  // createStatusWindow's comment), which is indistinguishable from the tray icon click doing
+  // nothing. Capped at 3s so a genuinely stuck load doesn't block the click forever — it'll
+  // just show blank in that pathological case instead of not showing at all.
+  if (isFreshWindow && statusWindowLoadPromise) {
+    await Promise.race([statusWindowLoadPromise, new Promise<void>((resolve) => setTimeout(resolve, 3000))]);
+  }
   if (statusWindow) {
     // Re-anchor to the CURRENT primary display every time — display config can change (monitor
     // connected/disconnected, resolution change) between opens, and createStatusWindow's own
