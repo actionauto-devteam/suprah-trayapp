@@ -316,15 +316,24 @@ const buildTrayMenu = () => {
 /* ─────────────────────────────────────────────────────────────────
    Windows
 ───────────────────────────────────────────────────────────────── */
-const createStatusWindow = () => {
+// Positions the status popup bottom-right of the CURRENT primary display — called every time
+// the window is about to be shown (see showStatusWindow below), not just once at creation.
+// Computing this only once, at creation time, was the actual bug behind "tray icon shows, but
+// clicking it displays nothing": if the display config at creation (e.g. at auto-launch/login,
+// before macOS/Windows finished enumerating monitors, or before/after a monitor gets
+// connected/disconnected) differs from later, the window silently sits off whatever's actually
+// visible now — indistinguishable from the app not responding at all.
+const positionStatusWindow = () => {
+  if (!statusWindow) return;
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.workAreaSize;
+  statusWindow.setPosition(Math.round(width - 316), Math.round(height - STATUS_HEIGHT_BASE - 16));
+};
 
+const createStatusWindow = () => {
   statusWindow = new BrowserWindow({
     width: 300,
     height: STATUS_HEIGHT_BASE,
-    x: width - 316,
-    y: height - STATUS_HEIGHT_BASE - 16,
     resizable: false,
     frame: false,
     transparent: true,
@@ -338,6 +347,7 @@ const createStatusWindow = () => {
     },
   });
 
+  positionStatusWindow();
   statusWindow.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'status.html'));
   statusWindow.on('blur', () => statusWindow?.hide());
   statusWindow.on('closed', () => { statusWindow = null; });
@@ -464,6 +474,12 @@ const handleStopRecording = () => {
 const showStatusWindow = () => {
   if (!statusWindow || statusWindow.isDestroyed()) createStatusWindow();
   if (statusWindow) {
+    // Re-anchor to the CURRENT primary display every time — display config can change (monitor
+    // connected/disconnected, resolution change) between opens, and createStatusWindow's own
+    // initial placement can be wrong if it ran before the OS finished enumerating displays at
+    // login. Without this, the window can end up permanently off-screen with no way to recover
+    // short of a reinstall — the exact "tray icon shows, click does nothing" symptom.
+    positionStatusWindow();
     statusWindow.webContents.send('status:update', agentState);
     statusWindow.show();
     statusWindow.focus();
