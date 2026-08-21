@@ -3,6 +3,11 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, No
 // app menu (About/Hide/Quit) reads, separately from the menu bar title, which comes from
 // Info.plist. Left as the old pre-rebrand name before, so the two disagreed.
 app.setName('Suprah AI - Timeproof Clock');
+// Pin userData explicitly right after naming — Electron derives the default userData
+// folder from app.getName(), so any FUTURE rename would otherwise silently orphan every
+// user's stored crm_token + offline screenshot queue again, same as this rename just did
+// (broke RJ Turingan's TimeProof coverage on 2026-08-21 — lost session, gap in captures).
+app.setPath('userData', app.getPath('userData'));
 app.disableHardwareAcceleration();
 import path from 'path';
 import http from 'http';

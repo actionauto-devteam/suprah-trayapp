@@ -44,6 +44,12 @@ jobs:
           retention-days: 30
 
   build-windows:
+    # Runs after build-mac, not in parallel — both jobs call `electron-builder --publish
+    # always` against the SAME version tag/GitHub Release. In parallel, both independently
+    # try to create that release; whichever loses the race gets a 422 "already_exists" and
+    # its own uploads are dropped entirely (this happened to v1.4.11 — Mac assets never made
+    # it onto the release, only Windows did). Serializing removes the race outright.
+    needs: build-mac
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
