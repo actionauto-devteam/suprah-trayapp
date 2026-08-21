@@ -1,5 +1,8 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor } from 'electron';
-app.setName('Action Auto CRM Tray-App');
+// Must match "productName" in package.json's build config — this is what macOS's default
+// app menu (About/Hide/Quit) reads, separately from the menu bar title, which comes from
+// Info.plist. Left as the old pre-rebrand name before, so the two disagreed.
+app.setName('Suprah AI - Timeproof Clock');
 app.disableHardwareAcceleration();
 import path from 'path';
 import http from 'http';
@@ -91,7 +94,7 @@ const getClockUrl            = () => getAuthMode() === 'main' ? '/api/timeclock/
 const CRM_URL = process.env.CRM_URL || 'https://your-crm-url.com/crm';
 const API_URL = process.env.API_URL || 'https://your-api-url.com';
 
-const autoLauncher = new AutoLaunch({ name: 'Action Auto Tray', isHidden: true });
+const autoLauncher = new AutoLaunch({ name: 'Suprah AI - Timeproof Clock', isHidden: true });
 
 /* ─────────────────────────────────────────────────────────────────
    State
@@ -217,6 +220,27 @@ const broadcastState = () => {
   }
   updateTrayIcon();
   tray?.setContextMenu(buildTrayMenu());
+};
+
+// Hoisted to module scope (not just local to startAgentServices) so showStatusWindow can force
+// an immediate recheck when the user reopens the tray popup after granting permission in System
+// Settings — otherwise the banner can lag up to 5min behind the OS-level grant (the interval below).
+const checkScreenRecordingPermission = () => {
+  const granted = getScreenRecordingGranted();
+  agentState.screenRecordingGranted = granted;
+  if (granted === false && !lastNotifiedScreenRecordingMissing) {
+    lastNotifiedScreenRecordingMissing = true;
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "Screen Recording permission needed",
+        body: 'Your screenshots have stopped. Click the tray icon and use "Fix Screen Recording" to re-enable it.',
+        silent: false,
+      }).show();
+    }
+  } else if (granted === true) {
+    lastNotifiedScreenRecordingMissing = false;
+  }
+  broadcastState();
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -505,6 +529,10 @@ const showStatusWindow = async () => {
     // login. Without this, the window can end up permanently off-screen with no way to recover
     // short of a reinstall — the exact "tray icon shows, click does nothing" symptom.
     positionStatusWindow();
+    // Force an immediate recheck instead of waiting on the 5min interval — this is exactly the
+    // moment a user comes back after granting Screen Recording via "Fix Now", so the banner
+    // should clear right away instead of looking like the grant didn't take.
+    if (process.platform === 'darwin') checkScreenRecordingPermission();
     statusWindow.webContents.send('status:update', agentState);
     statusWindow.show();
     statusWindow.focus();
@@ -765,23 +793,6 @@ const startAgentServices = async (token: string) => {
 
   // Re-apply department flags on startup (not just handleTrayAuth) so Web Dev users keep
   // mainMonitorOnly/idleDetectionExempt across auto-update relaunches; otherwise they silently reset to false.
-  const checkScreenRecordingPermission = () => {
-    const granted = getScreenRecordingGranted();
-    agentState.screenRecordingGranted = granted;
-    if (granted === false && !lastNotifiedScreenRecordingMissing) {
-      lastNotifiedScreenRecordingMissing = true;
-      if (Notification.isSupported()) {
-        new Notification({
-          title: "Screen Recording permission needed",
-          body: 'Your screenshots have stopped. Click the tray icon and use "Fix Screen Recording" to re-enable it.',
-          silent: false,
-        }).show();
-      }
-    } else if (granted === true) {
-      lastNotifiedScreenRecordingMissing = false;
-    }
-    broadcastState();
-  };
   checkScreenRecordingPermission();
   screenRecordingCheckIntervalId = setInterval(
     checkScreenRecordingPermission,
@@ -1598,6 +1609,7 @@ app.whenReady().then(async () => {
   // input arriving post-wake still flips back to active normally (same
   // !isIdle && wasIdle branch below), it just can no longer skip that check.
   powerMonitor.on('resume', () => {
+    ensureTray();
     if (agentState.isOnShift && !agentState.isOnBreak && activityStartMs !== null) {
       activityStartMs = null;
       agentState.activityStartMs = null;
@@ -1612,14 +1624,24 @@ app.whenReady().then(async () => {
     }
   });
 
-  tray = new Tray(getTrayIcon());
-  tray.setToolTip('Suprah AI - Timeproof Clock');
-  tray.setContextMenu(buildTrayMenu());
-
-  tray.on('click', () => {
-    if (statusWindow?.isVisible()) statusWindow.hide();
-    else showStatusWindow();
-  });
+  // macOS can silently tear down the NSStatusItem behind a Tray instance during a display/session
+  // reconfiguration (e.g. a remote-desktop session like TeamViewer attaching/detaching triggers the
+  // same kind of event as plugging/unplugging a monitor) — the icon vanishes for good with nothing
+  // recreating it, even though the rest of the app (screenshots, clock) keeps running fine. Wrapped
+  // so display-change listeners below can rebuild it instead of leaving the user with no icon at all.
+  const ensureTray = () => {
+    if (tray && !tray.isDestroyed()) return;
+    tray = new Tray(getTrayIcon());
+    tray.setToolTip('Suprah AI - Timeproof Clock');
+    tray.setContextMenu(buildTrayMenu());
+    tray.on('click', () => {
+      if (statusWindow?.isVisible()) statusWindow.hide();
+      else showStatusWindow();
+    });
+  };
+  ensureTray();
+  screen.on('display-added', ensureTray);
+  screen.on('display-removed', ensureTray);
 
   createStatusWindow();
 
@@ -1630,7 +1652,7 @@ app.whenReady().then(async () => {
     agentState.user = savedUser as User;
     agentState.isAgentOnline = true;
     updateTrayIcon();
-    tray.setContextMenu(buildTrayMenu());
+    tray?.setContextMenu(buildTrayMenu());
     // Proactively refresh token on startup (CRM mode only — main JWT is refreshed by the browser)
     const activeToken = getAuthMode() === 'crm' ? (await tryRefreshToken(savedToken) ?? savedToken) : savedToken;
     startAgentServices(activeToken);

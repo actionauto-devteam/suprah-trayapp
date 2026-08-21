@@ -1,6 +1,6 @@
 {
   "name": "actionauto-tray",
-  "version": "1.4.10",
+  "version": "1.4.11",
   "description": "Suprah AI - Timeproof Clock",
   "main": "dist/main.js",
   "author": "Action Auto",
@@ -47,7 +47,7 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "artifactName": "ActionAutoTraySetup.exe"
+      "artifactName": "SuprahTraySetup.exe"
     },
     "mac": {
       "target": [
@@ -62,7 +62,7 @@
       }
     },
     "dmg": {
-      "artifactName": "ActionAutoTraySetup.dmg"
+      "artifactName": "SuprahTraySetup.dmg"
     },
     "files": [
       "dist/**/*",

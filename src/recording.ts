@@ -115,7 +115,7 @@ export function stopRecording(): Promise<string | null> {
       }
 
       const webmBuffer = Buffer.from(buffer);
-      const recordingsDir = path.join(app.getPath('documents'), 'ActionAuto Recordings');
+      const recordingsDir = path.join(app.getPath('documents'), 'Suprah Recordings');
       if (!fs.existsSync(recordingsDir)) fs.mkdirSync(recordingsDir, { recursive: true });
 
       const now = new Date();
@@ -129,7 +129,7 @@ export function stopRecording(): Promise<string | null> {
         if (Notification.isSupported()) {
           new Notification({
             title: 'Recording saved',
-            body: `Saved to Documents/ActionAuto Recordings/${ts}.webm`,
+            body: `Saved to Documents/Suprah Recordings/${ts}.webm`,
             silent: false,
           }).show();
         }

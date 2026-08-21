@@ -34,7 +34,7 @@ jobs:
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ActionAutoTraySetup-mac
+          name: SuprahTraySetup-mac
           path: |
             release/*.dmg
             release/*.dmg.blockmap
@@ -70,7 +70,7 @@ jobs:
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ActionAutoTraySetup-windows
+          name: SuprahTraySetup-windows
           path: |
             release/*.exe
             release/*.exe.blockmap
