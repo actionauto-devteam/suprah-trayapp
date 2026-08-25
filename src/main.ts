@@ -1087,17 +1087,25 @@ const startAgentServices = async (token: string) => {
       const isNowTracking =
         agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle;
 
-      if (wasTracking && !isNowTracking) {
-        // Went on break specifically (not time-out/idle) — proof-of-work shot at the
-        // exact moment the tray learned break-in was recorded, so the gallery shows
-        // what was really on screen right then, independent of what the user
-        // separately believes the clock time was.
-        if (agentState.isOnBreak && !prevIsOnBreak) {
-          const currentToken = store.get('crm_token') as string | undefined;
-          if (currentToken && getAuthMode() === 'crm') {
-            captureAndUploadOnce(API_URL, currentToken, false, 'break-in').catch(() => {});
-          }
+      // Break-in/break-out proof-of-work shots — evaluated independently of the
+      // wasTracking/isNowTracking branches below (NOT nested inside them). Nesting
+      // this under wasTracking previously required activityStartMs to already be
+      // non-null at the moment break-in fired, which isn't guaranteed (e.g. Start
+      // Shift immediately followed by Break, before that assignment lands) — this
+      // must fire on every genuine isOnBreak transition regardless of that timing.
+      if (agentState.isOnBreak && !prevIsOnBreak) {
+        const currentToken = store.get('crm_token') as string | undefined;
+        if (currentToken && getAuthMode() === 'crm') {
+          captureAndUploadOnce(API_URL, currentToken, false, 'break-in').catch(() => {});
         }
+      } else if (!agentState.isOnBreak && prevIsOnBreak) {
+        const currentToken = store.get('crm_token') as string | undefined;
+        if (currentToken && getAuthMode() === 'crm') {
+          captureAndUploadOnce(API_URL, currentToken, false, 'break-out').catch(() => {});
+        }
+      }
+
+      if (wasTracking && !isNowTracking) {
         // Clocked out or went on break — save the current active interval (fire-and-forget)
         if (activityStartMs !== null) {
           const endAt = new Date();
@@ -1144,16 +1152,6 @@ const startAgentServices = async (token: string) => {
           shiftStartedAtMs > 0 &&
           Date.now() - shiftStartedAtMs < SHIFT_AUTO_RESUME_MS;
         const justEndedBreak = prevIsOnBreak && !agentState.isOnBreak;
-
-        // Same proof-of-work rationale as the break-in capture above — taken here
-        // (not inside the `if` below) so it always fires on a genuine break-out
-        // transition regardless of which auto-resume condition matched.
-        if (justEndedBreak) {
-          const currentToken = store.get('crm_token') as string | undefined;
-          if (currentToken && getAuthMode() === 'crm') {
-            captureAndUploadOnce(API_URL, currentToken, false, 'break-out').catch(() => {});
-          }
-        }
 
         if (
           justEndedBreak ||
