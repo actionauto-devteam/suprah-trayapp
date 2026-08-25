@@ -357,8 +357,19 @@ async function runCaptureAndUpload(): Promise<void> {
  * the original caller (fires once when the user goes idle, so admin gets a
  * snapshot of what was on screen) — callers capturing for another reason
  * (e.g. a proof-of-work shot at clock-out) should pass the real current state.
+ *
+ * `breakEvent`, when passed, tags this as a break-in/break-out proof shot instead
+ * of a regular idle/active one — lets the gallery show exactly what was on screen
+ * (and confirm the real time) the moment the user started or ended a break, instead
+ * of relying solely on the TimeLog timestamp, which is what the tray/server recorded
+ * as committed, not necessarily the instant the user believes they clicked.
  */
-export async function captureAndUploadOnce(url: string, authToken: string, idleDetected: boolean = true): Promise<void> {
+export async function captureAndUploadOnce(
+  url: string,
+  authToken: string,
+  idleDetected: boolean = true,
+  breakEvent?: 'break-in' | 'break-out',
+): Promise<void> {
   try {
     const jpegBuffer = await captureAllScreens();
     if (!jpegBuffer) return;
@@ -368,6 +379,7 @@ export async function captureAndUploadOnce(url: string, authToken: string, idleD
     form.append('shiftDate', toShiftDate());
     form.append('capturedAt', new Date().toISOString());
     form.append('idleDetected', String(idleDetected));
+    if (breakEvent) form.append('breakEvent', breakEvent);
 
     await axios.post(`${url}/api/crm/timeproof/screenshots`, form, {
       headers: { ...form.getHeaders(), Authorization: `Bearer ${authToken}` },
