@@ -1082,6 +1082,17 @@ const startAgentServices = async (token: string) => {
 
       if (prevIsOnBreak && !agentState.isOnBreak) {
         breakExceededNotified = false;
+
+        // Correct a stale idle flag on break-resume — idle.ts only re-samples
+        // powerMonitor.getSystemIdleTime() on its own 30s poll, so agentState.isIdle
+        // can still read true (set while genuinely away during the break) for up to
+        // 30s after the user has already clicked Resume — real input that itself
+        // proves they're active. Left uncorrected, isNowTracking below evaluates
+        // false right when it should flip true, so tracking/screenshots don't
+        // resume and the UI shows "Idle" for up to 30s after a real lunch-break
+        // return (reported as "flagged idle immediately after resuming").
+        agentState.isIdle = false;
+        forceIdleState(false);
       }
 
       const isNowTracking =
