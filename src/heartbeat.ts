@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { app } from 'electron';
 import { getIsIdle } from './idle';
 import { getScreenRecordingGranted } from './permissions';
 import { reportDiagnostic } from './screenshot';
@@ -39,6 +40,7 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
         {
           isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt,
           screenRecordingGranted: getScreenRecordingGranted(),
+          appVersion: app.getVersion(),
         },
         { headers: { Authorization: `Bearer ${_activeToken}` }, timeout: 10_000 }
       );

@@ -588,6 +588,11 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       });
       const s = data?.data;
       if (!s) return;
+      // Snapshot BEFORE this sync overwrites agentState.isOnBreak below — needed so the
+      // break-in/break-out proof-of-work capture further down only fires on a genuine
+      // transition this sync just discovered, not on every subsequent 60s resync tick
+      // while already on a break the app already knew about.
+      const prevIsOnBreakForCapture = agentState.isOnBreak;
       const STALE_SHIFT_MS = 16 * 60 * 60 * 1000;
       const elapsedMs = s.shiftStartedAt
         ? Date.now() - new Date(s.shiftStartedAt).getTime()
@@ -640,6 +645,18 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         activityStartMs !== null
       ) {
         // CONFIRMED on break but local interval is still running → missed break-in event.
+        // Same proof-of-work rationale as the live socket-driven capture — this covers the
+        // case that fix couldn't: the break-in socket event arrived (or fired) while this
+        // machine was asleep/disconnected, so it was never locally acted on until this
+        // resync caught up. Without this, a break taken while the socket event is missed
+        // gets zero break-in evidence, even though break-out (captured when the machine
+        // is normally awake and connected again) still does.
+        if (!prevIsOnBreakForCapture) {
+          const currentToken = store.get('crm_token') as string | undefined;
+          if (currentToken && getAuthMode() === 'crm') {
+            captureAndUploadOnce(API_URL, currentToken, false, 'break-in').catch(() => {});
+          }
+        }
         // Flush the interval up to when the break started so work time is preserved.
         const stopAt = agentState.breakStartedAt
           ? new Date(agentState.breakStartedAt).getTime()
@@ -674,6 +691,16 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         stopScreenshots();
         agentState.nextScreenshotIn = null;
       } else if (isNowTracking && activityStartMs === null) {
+        // Missed break-out counterpart to the missed-break-in capture above — the socket
+        // event that would normally trigger this (see connectSocket's callback) can be
+        // missed the same way (asleep/disconnected machine), leaving break-out evidence
+        // as the only piece of a break's proof-of-work if not also handled here.
+        if (prevIsOnBreakForCapture && !agentState.isOnBreak) {
+          const currentToken = store.get('crm_token') as string | undefined;
+          if (currentToken && getAuthMode() === 'crm') {
+            captureAndUploadOnce(API_URL, currentToken, false, 'break-out').catch(() => {});
+          }
+        }
         // Auto-resume tracking if shift <5min old or from today; older unclosed shifts stay paused for manual resume.
         const SHIFT_AUTO_RESUME_MS = 5 * 60 * 1000;
         const shiftStartedAtMs = agentState.shiftStartedAt
