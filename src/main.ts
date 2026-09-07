@@ -1,12 +1,6 @@
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor } from 'electron';
-// Must match "productName" in package.json's build config — this is what macOS's default
-// app menu (About/Hide/Quit) reads, separately from the menu bar title, which comes from
-// Info.plist. Left as the old pre-rebrand name before, so the two disagreed.
+
 app.setName('Suprah AI - Timeproof Clock');
-// Pin userData explicitly right after naming — Electron derives the default userData
-// folder from app.getName(), so any FUTURE rename would otherwise silently orphan every
-// user's stored crm_token + offline screenshot queue again, same as this rename just did
-// (broke RJ Turingan's TimeProof coverage on 2026-08-21 — lost session, gap in captures).
 app.setPath('userData', app.getPath('userData'));
 app.disableHardwareAcceleration();
 import path from 'path';
@@ -46,15 +40,10 @@ autoUpdater.on('update-downloaded', () => {
     if (activityStartMs !== null) {
       await commitActiveSegment(new Date());
     }
-    // A screenshot mid-upload only exists in memory until the request succeeds — killing the
-    // process here (before this wait was added) silently dropped it with no queue entry to
-    // recover it from, unlike a normal offline failure which does get saved to disk first.
     await waitForCaptureToFinish();
     autoUpdater.quitAndInstall(true, true);
   }, 10_000);
 });
-// In a packaged build, .env lives in extraResources (process.resourcesPath).
-// In dev, it lives at the project root (one level above dist/).
 const envPath = app.isPackaged
   ? path.join(process.resourcesPath, '.env')
   : path.join(__dirname, '..', '.env');
@@ -78,8 +67,6 @@ type StoreInstance = {
   set: (key: string, value: unknown) => void;
   delete: (key: string) => void;
 };
-// electron-store v11 is ESM-only; use require for CommonJS compatibility
-// eslint-disable-next-line @typescript-eslint/no-require-imports
 const Store = require('electron-store').default;
 const store = new Store({ encryptionKey: 'aa-tray-secure-key' }) as StoreInstance;
 

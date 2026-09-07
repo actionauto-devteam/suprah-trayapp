@@ -4,11 +4,7 @@ import { getIsIdle } from './idle';
 import { getScreenRecordingGranted } from './permissions';
 import { reportDiagnostic } from './screenshot';
 
-const INTERVAL_MS = 60_000; // every 60 seconds
-// Every heartbeat failure used to vanish into a bare `catch {}` — when a real user's
-// heartbeat silently stopped landing for 30+ minutes (triggering a stale-shift auto-clockout
-// while they were genuinely active), there was no way to tell whether it was a network drop,
-// an expired token, or something else. Throttled so a genuine extended outage doesn't spam.
+const INTERVAL_MS = 60_000;
 const PING_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
 
 type ShiftState = { isOnBreak: boolean; breakDurationSeconds: number; isOnShift: boolean; currentIntervalStartAt: string | null };
@@ -45,7 +41,6 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
         { headers: { Authorization: `Bearer ${_activeToken}` }, timeout: 10_000 }
       );
     } catch (err) {
-      // Still best-effort (no retry/queue) — but now leaves a trace instead of vanishing.
       const now = Date.now();
       if (now - lastPingFailReportedAt > PING_FAIL_REPORT_COOLDOWN_MS) {
         lastPingFailReportedAt = now;
