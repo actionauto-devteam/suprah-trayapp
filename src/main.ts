@@ -1109,6 +1109,11 @@ const startAgentServices = async (token: string) => {
         forceIdleState(false);
       }
 
+      if (!prevIsOnShift && agentState.isOnShift) {
+        agentState.isIdle = false;
+        forceIdleState(false);
+      }
+
       const isNowTracking =
         agentState.isOnShift && !agentState.isOnBreak && !agentState.isIdle;
 
