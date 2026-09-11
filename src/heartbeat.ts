@@ -14,6 +14,11 @@ let _ping: (() => Promise<void>) | null = null;
 let heartbeatPath = '/api/crm/timeproof/heartbeat';
 let _activeToken = '';
 let lastPingFailReportedAt = 0;
+let _onScreenshotsRequired: ((required: boolean) => void) | null = null;
+
+export function setOnScreenshotsRequired(cb: (required: boolean) => void): void {
+  _onScreenshotsRequired = cb;
+}
 
 export function setHeartbeatPath(path: string): void {
   heartbeatPath = path;
@@ -31,7 +36,7 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
     try {
       const { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt } = getShiftState();
       const isIdle = isOnBreak || !isOnShift ? false : getIsIdle();
-      await axios.post(
+      const res = await axios.post(
         `${apiUrl}${heartbeatPath}`,
         {
           isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt,
@@ -40,6 +45,8 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
         },
         { headers: { Authorization: `Bearer ${_activeToken}` }, timeout: 10_000 }
       );
+      const screenshotsRequired = (res.data?.data ?? res.data)?.screenshotsRequired;
+      if (typeof screenshotsRequired === 'boolean') _onScreenshotsRequired?.(screenshotsRequired);
     } catch (err) {
       const now = Date.now();
       if (now - lastPingFailReportedAt > PING_FAIL_REPORT_COOLDOWN_MS) {
@@ -69,5 +76,6 @@ export function stopHeartbeat(): void {
   }
   _ping = null;
   _activeToken = '';
+  _onScreenshotsRequired = null;
   heartbeatPath = '/api/crm/timeproof/heartbeat';
 }

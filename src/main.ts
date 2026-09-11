@@ -49,8 +49,8 @@ const envPath = app.isPackaged
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
-import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState } from './idle';
-import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken } from './heartbeat';
+import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC } from './idle';
+import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired } from './heartbeat';
 import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, waitForCaptureToFinish } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
@@ -81,6 +81,48 @@ const getResumableShiftUrl   = () => getAuthMode() === 'main' ? '/api/timeclock/
 const getClockUrl            = () => getAuthMode() === 'main' ? '/api/timeclock/clock'             : '/api/crm/time-clock';
 
 /* ─────────────────────────────────────────────────────────────────
+   Crash resilience
+───────────────────────────────────────────────────────────────── */
+const CRASH_NOTIFY_COOLDOWN_MS = 60 * 60 * 1000;
+let lastCrashNotifiedAt = 0;
+
+const notifyCrashOnce = (title: string, body: string): void => {
+  const now = Date.now();
+  if (now - lastCrashNotifiedAt < CRASH_NOTIFY_COOLDOWN_MS) return;
+  lastCrashNotifiedAt = now;
+  if (Notification.isSupported()) {
+    new Notification({ title, body, silent: true }).show();
+  }
+};
+
+process.on('uncaughtException', (err) => {
+  reportDiagnostic('main_uncaught_exception', err?.message || String(err), {
+    stack: err instanceof Error ? err.stack : undefined,
+    platform: process.platform,
+  });
+  notifyCrashOnce('TimeProof hit an error', 'The app recovered and is still tracking. If problems continue, please restart it.');
+});
+
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  reportDiagnostic('main_unhandled_rejection', err.message, {
+    stack: err.stack,
+    platform: process.platform,
+  });
+});
+
+const safeAsync = (fn: () => Promise<void>, label: string) => async () => {
+  try {
+    await fn();
+  } catch (err) {
+    reportDiagnostic('interval_error', `${label} threw`, {
+      error: err instanceof Error ? err.message : String(err),
+      platform: process.platform,
+    });
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────
    Config
 ───────────────────────────────────────────────────────────────── */
 const CRM_URL = process.env.CRM_URL || 'https://your-crm-url.com/crm';
@@ -96,6 +138,7 @@ interface User {
   username: string;
   role: string;
   screenshotExempt?: boolean;
+  screenshotsRequired?: boolean;
   mainMonitorOnly?: boolean;
   idleDetectionExempt?: boolean;
 }
@@ -189,6 +232,8 @@ const STATUS_HEIGHT_CALL = 528;
 // only added when shown, so no impact for users who never see it.
 const SCREEN_RECORDING_BANNER_HEIGHT = 60;
 
+let lastTraySignature = '';
+
 const broadcastState = () => {
   if (statusWindow && !statusWindow.isDestroyed()) {
     const callState = getCurrentCall();
@@ -210,8 +255,25 @@ const broadcastState = () => {
       } : null,
     });
   }
-  updateTrayIcon();
-  tray?.setContextMenu(buildTrayMenu());
+  const call = getCurrentCall();
+  const traySignature = [
+    agentState.isAuthenticated,
+    agentState.isAgentOnline,
+    agentState.user?.fullName ?? '',
+    agentState.isOnShift,
+    activityStartMs !== null,
+    agentState.isIdle,
+    agentState.isOnBreak,
+    call?.meetingId ?? '',
+    call?.title ?? '',
+    call?.canRecord ?? false,
+    getRecordingStatus(),
+  ].join('|');
+  if (traySignature !== lastTraySignature) {
+    lastTraySignature = traySignature;
+    updateTrayIcon();
+    tray?.setContextMenu(buildTrayMenu());
+  }
 };
 
 // Hoisted to module scope (not just local to startAgentServices) so showStatusWindow can force
@@ -238,6 +300,8 @@ const checkScreenRecordingPermission = () => {
 /* ─────────────────────────────────────────────────────────────────
    Tray icon helpers
 ───────────────────────────────────────────────────────────────── */
+const trayIconCache = new Map<string, Electron.NativeImage>();
+
 const getTrayIcon = () => {
   // Use activityStartMs as fallback — same logic as status.html's effectivelyOnShift
   const effectivelyOnShift = agentState.isOnShift || activityStartMs !== null;
@@ -247,9 +311,14 @@ const getTrayIcon = () => {
       : 'tray-offline.png'
     : 'tray-offline.png';
 
+  const cached = trayIconCache.get(iconName);
+  if (cached) return cached;
+
   const iconPath = path.join(__dirname, '..', 'assets', iconName);
   try {
-    return nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    const img = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    trayIconCache.set(iconName, img);
+    return img;
   } catch {
     return nativeImage.createEmpty();
   }
@@ -383,6 +452,12 @@ const createStatusWindow = () => {
     });
   statusWindow.on('blur', () => statusWindow?.hide());
   statusWindow.on('closed', () => { statusWindow = null; statusWindowLoadPromise = null; });
+  statusWindow.webContents.on('unresponsive', () => {
+    reportDiagnostic('status_window_unresponsive', 'Status window renderer stopped responding', { platform: process.platform });
+  });
+  statusWindow.webContents.on('responsive', () => {
+    reportDiagnostic('status_window_responsive', 'Status window renderer recovered', { platform: process.platform });
+  });
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -792,7 +867,11 @@ const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
   }
 };
 
+let agentServicesStarted = false;
+
 const startAgentServices = async (token: string) => {
+  if (agentServicesStarted) return;
+  agentServicesStarted = true;
   const SCREENSHOT_INTERVAL_MS = 10 * 60 * 1000;
   const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 60 * 1000; // 10 hours — renew before 12h expiry
 
@@ -804,11 +883,16 @@ const startAgentServices = async (token: string) => {
   } else {
     setHeartbeatPath("/api/crm/timeproof/heartbeat");
     // Per-user screenshot exemption (CrmUser.screenshotExempt); applies only after next login/reconnect with fresh token, not mid-session.
-    setSkipCaptures(!!agentState.user?.screenshotExempt);
+    setSkipCaptures(!!agentState.user?.screenshotExempt || agentState.user?.screenshotsRequired === false);
   }
 
   setMainMonitorOnly(!!agentState.user?.mainMonitorOnly);
   setIdleDetectionExempt(!!agentState.user?.idleDetectionExempt);
+
+  setOnScreenshotsRequired((required) => {
+    if (getAuthMode() === "main") return;
+    setSkipCaptures(!!agentState.user?.screenshotExempt || !required);
+  });
 
   // Re-apply department flags on startup (not just handleTrayAuth) so Web Dev users keep
   // mainMonitorOnly/idleDetectionExempt across auto-update relaunches; otherwise they silently reset to false.
@@ -843,7 +927,7 @@ const startAgentServices = async (token: string) => {
   // Proactively renew token every 10 hours (CRM mode only — main JWT is refreshed by the browser)
   tokenRefreshIntervalId =
     authMode === "crm"
-      ? setInterval(async () => {
+      ? setInterval(safeAsync(async () => {
           const current = store.get("crm_token") as string | undefined;
           if (!current) return;
           const refreshed = await tryRefreshToken(current);
@@ -853,7 +937,7 @@ const startAgentServices = async (token: string) => {
           }
           updateHeartbeatToken(refreshed);
           updateSocketToken(refreshed);
-        }, TOKEN_REFRESH_INTERVAL_MS)
+        }, 'token-refresh'), TOKEN_REFRESH_INTERVAL_MS)
       : null;
 
   startIdleMonitor(
@@ -873,9 +957,11 @@ const startAgentServices = async (token: string) => {
       // for a segment that was never open, matching commitActiveSegment's own gate.
       const hadOpenSegment = wasTracking && activityStartMs !== null;
 
+      const IDLE_BACKDATE_CAP_SEC = IDLE_THRESHOLD_SEC + 60;
+
       if (isIdle && !wasIdle) {
         if (hadOpenSegment) {
-          const idleSec = powerMonitor.getSystemIdleTime();
+          const idleSec = Math.min(powerMonitor.getSystemIdleTime(), IDLE_BACKDATE_CAP_SEC);
           const endAt = new Date(Date.now() - idleSec * 1000);
           await commitActiveSegment(endAt);
           activityStartMs = null;
@@ -887,7 +973,7 @@ const startAgentServices = async (token: string) => {
         if (hadOpenSegment) pingHeartbeat();
 
         if (hadOpenSegment && Notification.isSupported()) {
-          const flaggedIdleSec = powerMonitor.getSystemIdleTime();
+          const flaggedIdleSec = Math.min(powerMonitor.getSystemIdleTime(), IDLE_BACKDATE_CAP_SEC);
           const flaggedMin = Math.floor(flaggedIdleSec / 60);
           const flaggedSec = flaggedIdleSec % 60;
           new Notification({
@@ -944,7 +1030,7 @@ const startAgentServices = async (token: string) => {
     },
   );
 
-  activityCheckpointIntervalId = setInterval(async () => {
+  activityCheckpointIntervalId = setInterval(safeAsync(async () => {
     if (
       !agentState.isOnShift ||
       agentState.isOnBreak ||
@@ -964,7 +1050,7 @@ const startAgentServices = async (token: string) => {
       activityStartMs = now.getTime();
       agentState.activityStartMs = activityStartMs;
     }
-  }, ACTIVITY_CHECKPOINT_MS);
+  }, 'activity-checkpoint'), ACTIVITY_CHECKPOINT_MS);
 
   // Check every 30s if break has run 1 minute past the 1h limit — warn the
   // user once per break session, 4 minutes before the backend escalates to
@@ -1002,7 +1088,7 @@ const startAgentServices = async (token: string) => {
   // poll cadence) so it fires close to the 30-minute mark regardless of when
   // the last check happened to run.
   autoClockoutTriggeredForThisIdleStretch = false;
-  autoClockoutCheckIntervalId = setInterval(async () => {
+  autoClockoutCheckIntervalId = setInterval(safeAsync(async () => {
     if (!agentState.isOnShift || agentState.isOnBreak) {
       autoClockoutTriggeredForThisIdleStretch = false;
       return;
@@ -1026,7 +1112,7 @@ const startAgentServices = async (token: string) => {
         silent: false,
       }).show();
     }
-  }, 60_000);
+  }, 'auto-clockout'), 60_000);
 
   startHeartbeat(API_URL, token, () => {
     const isOnBreak = agentState.isOnBreak;
@@ -1230,10 +1316,10 @@ const startAgentServices = async (token: string) => {
   // Re-sync every 60 seconds (same cadence as heartbeat) so missed socket
   // events (break-in, break-out, time-out) self-correct within one minute
   // rather than waiting the old 5-minute window.
-  resyncIntervalId = setInterval(() => {
+  resyncIntervalId = setInterval(safeAsync(async () => {
     const currentToken = store.get("crm_token") as string | undefined;
-    if (currentToken) syncShiftState(currentToken);
-  }, 60 * 1000);
+    if (currentToken) await syncShiftState(currentToken);
+  }, 'resync-shift-state'), 60 * 1000);
 
   // Poll for active call state every 10s — drives recording/Autrix menu visibility
   startCallStatePolling(
@@ -1276,6 +1362,7 @@ const stopAgentServices = () => {
   }
   breakExceededNotified = false;
   autoClockoutTriggeredForThisIdleStretch = false;
+  agentServicesStarted = false;
   stopIdleMonitor();
   stopHeartbeat();
   stopScreenshots();
@@ -1508,6 +1595,9 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   agentState.isAgentOnline = true;
   setMainMonitorOnly(!!user.mainMonitorOnly);
   setIdleDetectionExempt(!!user.idleDetectionExempt);
+  if (authMode === 'crm') {
+    setSkipCaptures(!!user.screenshotExempt || user.screenshotsRequired === false);
+  }
   store.set('crm_token', token);
   store.set('auth_mode', authMode);
   store.set('user', user);
@@ -1611,6 +1701,31 @@ app.whenReady().then(async () => {
   registerRecordingIpcHandlers();
   startLocalAuthServer();
 
+  app.on('render-process-gone', (_e, wc, details) => {
+    reportDiagnostic('render_process_gone', details.reason, { exitCode: details.exitCode, platform: process.platform });
+    if (statusWindow && !statusWindow.isDestroyed() && wc === statusWindow.webContents) {
+      statusWindow.destroy();
+      statusWindow = null;
+      statusWindowLoadPromise = null;
+      createStatusWindow();
+    }
+  });
+  app.on('child-process-gone', (_e, details) => {
+    reportDiagnostic('child_process_gone', `${details.type}: ${details.reason}`, { exitCode: details.exitCode, platform: process.platform });
+  });
+
+  let lastWatchdogTickAt = Date.now();
+  const WATCHDOG_INTERVAL_MS = 5_000;
+  const WATCHDOG_STALL_THRESHOLD_MS = 3_000;
+  setInterval(() => {
+    const now = Date.now();
+    const blockedMs = now - lastWatchdogTickAt - WATCHDOG_INTERVAL_MS;
+    lastWatchdogTickAt = now;
+    if (blockedMs > WATCHDOG_STALL_THRESHOLD_MS) {
+      reportDiagnostic('main_thread_stall', 'Main event loop was blocked', { blockedMs: Math.round(blockedMs), platform: process.platform });
+    }
+  }, WATCHDOG_INTERVAL_MS);
+
   // Auto clock-out on sleep/shutdown — only once the shift has already
   // rendered 8+ hours (same rule as the idle-based trigger above). Electron
   // gives no guaranteed grace period before the OS actually suspends/powers
@@ -1661,6 +1776,7 @@ app.whenReady().then(async () => {
   // closes that gap regardless of what the idle-timer reports afterward: real
   // input arriving post-wake still flips back to active normally (same
   // !isIdle && wasIdle branch below), it just can no longer skip that check.
+  let lastResumeForcedIdleAt = 0;
   powerMonitor.on('resume', () => {
     ensureTray();
     if (agentState.isOnShift && !agentState.isOnBreak && activityStartMs !== null) {
@@ -1668,6 +1784,7 @@ app.whenReady().then(async () => {
       agentState.activityStartMs = null;
       agentState.isIdle = true;
       forceIdleState(true);
+      lastResumeForcedIdleAt = Date.now();
       stopScreenshots();
       agentState.nextScreenshotIn = null;
       reportDiagnostic('resume_from_suspend', 'System resumed from sleep — forced idle pending real input', {
@@ -1676,6 +1793,28 @@ app.whenReady().then(async () => {
       broadcastState();
     }
   });
+
+  const handleUserPresent = (source: string) => {
+    if (Date.now() - lastResumeForcedIdleAt < 3000) return;
+    if (!agentState.isOnShift || agentState.isOnBreak) return;
+    if (!agentState.isIdle) return;
+    agentState.isIdle = false;
+    forceIdleState(false);
+    activityStartMs = Date.now();
+    agentState.activityStartMs = activityStartMs;
+    const currentToken = store.get('crm_token') as string | undefined;
+    if (currentToken && agentState.isAuthenticated) {
+      startScreenshots(API_URL, currentToken);
+      agentState.nextScreenshotIn = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    }
+    pingHeartbeat();
+    reportDiagnostic('user_present_cleared_idle', `Cleared stale idle flag on ${source}`, { platform: process.platform });
+    broadcastState();
+  };
+  powerMonitor.on('unlock-screen', () => handleUserPresent('unlock-screen'));
+  if (process.platform === 'darwin') {
+    powerMonitor.on('user-did-become-active', () => handleUserPresent('user-did-become-active'));
+  }
 
   // macOS can silently tear down the NSStatusItem behind a Tray instance during a display/session
   // reconfiguration (e.g. a remote-desktop session like TeamViewer attaching/detaching triggers the

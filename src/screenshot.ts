@@ -9,6 +9,7 @@ import { getScreenRecordingGranted } from './permissions';
 
 const INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
 const CAPTURE_FAIL_COOLDOWN_MS = 30 * 60 * 1000; // notify at most once per 30 min
+const CAPTURE_TIMEOUT_MS = 20 * 1000;
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let watchdogIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -74,8 +75,17 @@ export function updateScreenshotToken(newToken: string): void {
 // something checkable directly on the packaged install, without needing to
 // run from source to see console output.
 const DIAGNOSTIC_DEBUG_LOG = path.join(app.getPath('userData'), 'diagnostic-debug.log');
+const DIAGNOSTIC_LOG_MAX_BYTES = 1_000_000;
+const DIAGNOSTIC_LOG_KEEP_BYTES = 200_000;
 const logDiagnosticAttempt = (line: string): void => {
   try {
+    try {
+      if (fs.statSync(DIAGNOSTIC_DEBUG_LOG).size > DIAGNOSTIC_LOG_MAX_BYTES) {
+        const tail = fs.readFileSync(DIAGNOSTIC_DEBUG_LOG, 'utf-8').slice(-DIAGNOSTIC_LOG_KEEP_BYTES);
+        fs.writeFileSync(DIAGNOSTIC_DEBUG_LOG, tail);
+      }
+    } catch {
+    }
     fs.appendFileSync(DIAGNOSTIC_DEBUG_LOG, `[${new Date().toISOString()}] ${line}\n`);
   } catch {
   }
@@ -172,7 +182,8 @@ async function reportScreenshotPlaceholder(): Promise<void> {
  * Captures all connected monitors and stitches them horizontally into a single JPEG.
  * Single-monitor setups follow the same path as before (no stitching overhead).
  */
-const DEFAULT_THUMBNAIL_SIZE = { width: 1920, height: 1080 };
+const DEFAULT_THUMBNAIL_SIZE = { width: 1280, height: 800 };
+const MAX_STITCHED_WIDTH = 3200;
 
 async function getScreenSources() {
   return desktopCapturer.getSources({ types: ['screen'], thumbnailSize: DEFAULT_THUMBNAIL_SIZE });
@@ -215,11 +226,7 @@ async function captureAllScreens(): Promise<Buffer | null> {
   // shows them ("Display 1", "Display 2", ...), so this is simply "System
   // Monitor 1", every time, deterministic, no matching/guessing involved.
   if (mainMonitorOnly && sources.length > 1) {
-    // Height omitted (left to auto-scale) — giving resize() both width AND
-    // height stretches the image to exactly fit, distorting anything that
-    // isn't 16:9 (ultrawide, 4:3, portrait monitors, etc). Width-only
-    // preserves the source's real aspect ratio.
-    return sources[0].thumbnail.resize({ width: 1920 }).toJPEG(80);
+    return sources[0].thumbnail.toJPEG(80);
   }
 
   if (sources.length === 1) return sources[0].thumbnail.toJPEG(80);
@@ -249,9 +256,13 @@ async function captureAllScreens(): Promise<Buffer | null> {
       img.bitmap.copy(stitched, dstStart, srcStart, srcStart + img.size.width * 4);
     }
     xOffset += img.size.width;
+    await new Promise((r) => setImmediate(r));
   }
 
-  const combined = nativeImage.createFromBitmap(stitched, { width: totalWidth, height: maxHeight });
+  let combined = nativeImage.createFromBitmap(stitched, { width: totalWidth, height: maxHeight });
+  if (totalWidth > MAX_STITCHED_WIDTH) {
+    combined = combined.resize({ width: MAX_STITCHED_WIDTH });
+  }
   // Slightly lower quality for combined image to keep file size reasonable
   return combined.toJPEG(75);
 }
@@ -302,7 +313,13 @@ async function runCaptureAndUpload(): Promise<void> {
   }
 
   try {
-    const jpegBuffer = await captureAllScreens();
+    const jpegBuffer = await Promise.race([
+      captureAllScreens(),
+      new Promise<null>((resolve) => setTimeout(() => {
+        reportDiagnostic('capture_timeout', 'captureAllScreens exceeded the time budget', { budgetMs: CAPTURE_TIMEOUT_MS });
+        resolve(null);
+      }, CAPTURE_TIMEOUT_MS)),
+    ]);
     if (!jpegBuffer) return;
 
     const capturedAt = new Date().toISOString();
