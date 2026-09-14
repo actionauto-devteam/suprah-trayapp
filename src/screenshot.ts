@@ -189,8 +189,12 @@ async function getScreenSources() {
   return desktopCapturer.getSources({ types: ['screen'], thumbnailSize: DEFAULT_THUMBNAIL_SIZE });
 }
 
+const SLOW_CAPTURE_REPORT_MS = 5_000;
+
 async function captureAllScreens(): Promise<Buffer | null> {
+  const t0 = Date.now();
   let sources = await getScreenSources();
+  const tGetSources = Date.now();
 
   if (sources.length === 0) {
     // Retry once after a short delay before giving up — remote
@@ -200,6 +204,19 @@ async function captureAllScreens(): Promise<Buffer | null> {
     await new Promise((r) => setTimeout(r, 2_000));
     sources = await getScreenSources();
   }
+
+  const reportIfSlow = (stage: string, extra?: Record<string, unknown>) => {
+    const elapsedMs = Date.now() - t0;
+    if (elapsedMs > SLOW_CAPTURE_REPORT_MS) {
+      reportDiagnostic('capture_slow', 'Capture completed slower than expected', {
+        elapsedMs,
+        getSourcesMs: tGetSources - t0,
+        sourceCount: sources.length,
+        stage,
+        ...extra,
+      });
+    }
+  };
 
   if (sources.length === 0) {
     // A legitimate zero-source result is not a normal "nothing to do" case —
@@ -226,19 +243,29 @@ async function captureAllScreens(): Promise<Buffer | null> {
   // shows them ("Display 1", "Display 2", ...), so this is simply "System
   // Monitor 1", every time, deterministic, no matching/guessing involved.
   if (mainMonitorOnly && sources.length > 1) {
-    return sources[0].thumbnail.toJPEG(80);
+    const jpeg = sources[0].thumbnail.toJPEG(80);
+    reportIfSlow('main-monitor-only');
+    return jpeg;
   }
 
-  if (sources.length === 1) return sources[0].thumbnail.toJPEG(80);
+  if (sources.length === 1) {
+    const jpeg = sources[0].thumbnail.toJPEG(80);
+    reportIfSlow('single-source');
+    return jpeg;
+  }
 
   // Filter out any zero-size thumbnails (disconnected/mirrored displays)
+  const tBeforeBitmaps = Date.now();
   const images = sources
     .map(s => ({ bitmap: s.thumbnail.toBitmap(), size: s.thumbnail.getSize() }))
     .filter(img => img.size.width > 0 && img.size.height > 0);
+  const tAfterBitmaps = Date.now();
 
   if (images.length === 0) return null;
   if (images.length === 1) {
-    return nativeImage.createFromBitmap(images[0].bitmap, images[0].size).toJPEG(80);
+    const jpeg = nativeImage.createFromBitmap(images[0].bitmap, images[0].size).toJPEG(80);
+    reportIfSlow('single-image-after-filter', { bitmapsMs: tAfterBitmaps - tBeforeBitmaps });
+    return jpeg;
   }
 
   // Stitch monitors side-by-side using raw RGBA bitmap data
@@ -258,13 +285,21 @@ async function captureAllScreens(): Promise<Buffer | null> {
     xOffset += img.size.width;
     await new Promise((r) => setImmediate(r));
   }
+  const tAfterStitch = Date.now();
 
   let combined = nativeImage.createFromBitmap(stitched, { width: totalWidth, height: maxHeight });
   if (totalWidth > MAX_STITCHED_WIDTH) {
     combined = combined.resize({ width: MAX_STITCHED_WIDTH });
   }
   // Slightly lower quality for combined image to keep file size reasonable
-  return combined.toJPEG(75);
+  const jpeg = combined.toJPEG(75);
+  reportIfSlow('multi-monitor-stitch', {
+    bitmapsMs: tAfterBitmaps - tBeforeBitmaps,
+    stitchMs: tAfterStitch - tAfterBitmaps,
+    encodeMs: Date.now() - tAfterStitch,
+    monitorWidths: images.map((img) => img.size.width),
+  });
+  return jpeg;
 }
 
 // Guards against a new interval tick overlapping a still-running previous one — without

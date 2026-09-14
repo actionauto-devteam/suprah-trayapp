@@ -12,6 +12,7 @@ let lastIdleState = false;
 let lastIdleSeconds = 0;
 let idleSampleStreak = 0;
 let lastTickAt = 0;
+let previousIdleSecondsSample = 0;
 
 export function getLastIdleSeconds(): number {
   return lastIdleSeconds;
@@ -53,6 +54,7 @@ export function startIdleMonitor(onIdleChange: IdleCallback, onPeriodicCheck?: (
 
     if (wallGapMs > FROZEN_TIMER_GAP_MS) {
       idleSampleStreak = 0;
+      previousIdleSecondsSample = idleSeconds;
       if (lastIdleState) {
         lastIdleState = false;
         onIdleChange(false);
@@ -60,7 +62,10 @@ export function startIdleMonitor(onIdleChange: IdleCallback, onPeriodicCheck?: (
       return;
     }
 
-    if (idleSeconds > wallGapMs / 1000 + IDLE_THRESHOLD_SEC) {
+    const idleGrowth = idleSeconds - previousIdleSecondsSample;
+    previousIdleSecondsSample = idleSeconds;
+    const plausibleMaxGrowth = wallGapMs / 1000 + 60;
+    if (idleGrowth > plausibleMaxGrowth) {
       idleSampleStreak = 0;
       return;
     }
@@ -93,6 +98,7 @@ export function stopIdleMonitor(): void {
   tickCount = 0;
   idleSampleStreak = 0;
   lastTickAt = 0;
+  previousIdleSecondsSample = 0;
 }
 
 export function getIsIdle(): boolean {
@@ -103,4 +109,5 @@ export function forceIdleState(value: boolean): void {
   lastIdleState = value;
   idleSampleStreak = value ? CONSECUTIVE_IDLE_SAMPLES_TO_TRIP : 0;
   lastTickAt = 0;
+  previousIdleSecondsSample = 0;
 }
