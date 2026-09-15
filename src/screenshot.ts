@@ -111,7 +111,7 @@ export async function reportDiagnostic(event: string, message: string, meta?: Re
 
 // Use MDT (UTC-6) so shiftDate matches the backend's COMPANY_TZ_OFFSET_MINUTES = -360
 const MDT_OFFSET_MS = -6 * 60 * 60 * 1000;
-const toShiftDate = () => {
+export const toShiftDate = () => {
   const mdt = new Date(Date.now() + MDT_OFFSET_MS);
   return `${mdt.getUTCFullYear()}-${String(mdt.getUTCMonth() + 1).padStart(2, '0')}-${String(mdt.getUTCDate()).padStart(2, '0')}`;
 };
@@ -421,25 +421,38 @@ export async function captureAndUploadOnce(
   authToken: string,
   idleDetected: boolean = true,
   breakEvent?: 'break-in' | 'break-out',
-): Promise<void> {
+): Promise<boolean> {
   try {
     const jpegBuffer = await captureAllScreens();
-    if (!jpegBuffer) return;
+    if (!jpegBuffer) return false;
 
-    const form = new FormData();
-    form.append('screenshot', jpegBuffer, { filename: `${Date.now()}.jpg`, contentType: 'image/jpeg' });
-    form.append('shiftDate', toShiftDate());
-    form.append('capturedAt', new Date().toISOString());
-    form.append('idleDetected', String(idleDetected));
-    if (breakEvent) form.append('breakEvent', breakEvent);
+    const capturedAt = new Date().toISOString();
+    const shiftDate = toShiftDate();
 
-    await axios.post(`${url}/api/crm/timeproof/screenshots`, form, {
-      headers: { ...form.getHeaders(), Authorization: `Bearer ${authToken}` },
-      timeout: 30_000,
-    });
-    bumpTodayCount();
+    try {
+      const form = new FormData();
+      form.append('screenshot', jpegBuffer, { filename: `${Date.now()}.jpg`, contentType: 'image/jpeg' });
+      form.append('shiftDate', shiftDate);
+      form.append('capturedAt', capturedAt);
+      form.append('idleDetected', String(idleDetected));
+      if (breakEvent) form.append('breakEvent', breakEvent);
+
+      await axios.post(`${url}/api/crm/timeproof/screenshots`, form, {
+        headers: { ...form.getHeaders(), Authorization: `Bearer ${authToken}` },
+        timeout: 30_000,
+      });
+      bumpTodayCount();
+      return true;
+    } catch {
+      const localDir = path.join(app.getPath('userData'), 'screenshot-cache', shiftDate);
+      if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
+      const filePath = path.join(localDir, `${Date.now()}.jpg`);
+      fs.writeFileSync(filePath, jpegBuffer);
+      enqueue({ filePath, shiftDate, capturedAt, idleDetected });
+      return true;
+    }
   } catch {
-    // Silent fail — best-effort idle snapshot
+    return false;
   }
 }
 

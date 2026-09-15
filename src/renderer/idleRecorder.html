@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Idle Recorder</title>
+</head>
+<body>
+<script>
+(function () {
+  'use strict';
+
+  const api = window.idleRecorderAPI;
+
+  let mediaRecorder = null;
+  let videoChunks = [];
+  let displayStream = null;
+
+  function stopAllStreams() {
+    displayStream?.getTracks().forEach(t => t.stop());
+    displayStream = null;
+  }
+
+  api.onStart(async ({ sourceId }) => {
+    try {
+      const displayConstraints = {
+        video: {
+          mandatory: {
+            chromeMediaSource: 'desktop',
+            chromeMediaSourceId: sourceId,
+            maxWidth: 640,
+            maxHeight: 400,
+            maxFrameRate: 2,
+          },
+        },
+      };
+
+      displayStream = await navigator.mediaDevices.getUserMedia(displayConstraints);
+
+      videoChunks = [];
+      const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+        ? 'video/webm;codecs=vp8'
+        : 'video/webm';
+
+      mediaRecorder = new MediaRecorder(displayStream, { mimeType, videoBitsPerSecond: 200_000 });
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) videoChunks.push(e.data);
+      };
+      mediaRecorder.start(5000);
+    } catch (err) {
+      api.sendError(err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  api.onStop(() => {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+      stopAllStreams();
+      api.sendReady([]);
+      return;
+    }
+
+    mediaRecorder.onstop = () => {
+      const blob = new Blob(videoChunks, { type: 'video/webm' });
+      blob.arrayBuffer().then((ab) => {
+        api.sendReady(Array.from(new Uint8Array(ab)));
+        stopAllStreams();
+      }).catch(() => {
+        api.sendReady([]);
+        stopAllStreams();
+      });
+    };
+
+    mediaRecorder.stop();
+  });
+})();
+</script>
+</body>
+</html>

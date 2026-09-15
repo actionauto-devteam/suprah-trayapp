@@ -470,6 +470,10 @@
         <span class="status-dot" id="statusDot"></span>
         <span id="statusText">Not Clocked In</span>
       </div>
+      <div id="idleRecordingBadge" style="display:none; margin-top:6px; font-size:11px; color:#ef4444; align-items:center; gap:5px;">
+        <span style="width:7px; height:7px; border-radius:50%; background:#ef4444; display:inline-block;"></span>
+        Recording idle proof
+      </div>
     </div>
 
     <!-- Timers -->
@@ -648,6 +652,7 @@
       state = s;
 
       document.getElementById('screenRecordingBanner').style.display = s.screenRecordingGranted === false ? '' : 'none';
+      document.getElementById('idleRecordingBadge').style.display = s.idleRecordingActive ? 'flex' : 'none';
 
       // Not signed in yet — show the waiting panel only, hide everything shift-related.
       // Signing in happens on the dashboard in the browser; this window picks it up

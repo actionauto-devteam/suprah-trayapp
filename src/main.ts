@@ -49,13 +49,15 @@ const envPath = app.isPackaged
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
-import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC } from './idle';
+import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC, getLastIdleSeconds } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, waitForCaptureToFinish } from './screenshot';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, waitForCaptureToFinish, toShiftDate } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
 import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
 import { startRecording, stopRecording, getRecordingStatus, registerRecordingIpcHandlers, destroyRecorderWindow } from './recording';
+import { startIdleRecording, stopAndUploadIdleRecording, destroyIdleRecorderWindow, registerIdleRecordingIpcHandlers, getIdleRecordingStatus } from './idleRecording';
+import { flushIdleRecordingQueue } from './idleRecordingQueue';
 import { initTranscription, resetTranscript, getFullTranscript, processAudioChunk } from './transcription';
 import { io as ioClient, Socket as TraySocket } from 'socket.io-client';
 
@@ -141,6 +143,7 @@ interface User {
   screenshotsRequired?: boolean;
   mainMonitorOnly?: boolean;
   idleDetectionExempt?: boolean;
+  idleVideoProofEnabled?: boolean;
 }
 
 interface AgentState {
@@ -164,6 +167,7 @@ interface AgentState {
   wallClockBaseAt: number | null;
   // macOS-only flag; null elsewhere or before first check, not guaranteed stable once granted (unsigned build).
   screenRecordingGranted: boolean | null;
+  idleRecordingActive: boolean;
 }
 
 let tray: Tray | null = null;
@@ -196,6 +200,7 @@ const getRenderedMsSoFar = (): number =>
 // the basis for the displayed timer or auto-clockout hour-threshold checks.
 let activityStartMs: number | null = null;  // when current active period began (local clock)
 let todayTotalActiveMs: number = 0;         // sum of completed active interval durations
+let idleRecordingStartMs: number | null = null;
 
 // Authoritative wall-clock baseline — see AgentState.wallClockBaseMs/wallClockBaseAt.
 let wallClockBaseMs: number = 0;
@@ -219,6 +224,7 @@ let agentState: AgentState = {
   wallClockBaseMs: 0,
   wallClockBaseAt: null,
   screenRecordingGranted: null,
+  idleRecordingActive: false,
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -867,6 +873,31 @@ const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
   }
 };
 
+const CAPTURE_RETRY_ATTEMPTS = 3;
+const CAPTURE_RETRY_DELAY_MS = 3_000;
+
+const captureIdleEvidenceWithRetry = async (token: string): Promise<boolean> => {
+  for (let attempt = 1; attempt <= CAPTURE_RETRY_ATTEMPTS; attempt++) {
+    const ok = await captureAndUploadOnce(API_URL, token);
+    if (ok) return true;
+    if (attempt < CAPTURE_RETRY_ATTEMPTS) {
+      await new Promise((r) => setTimeout(r, CAPTURE_RETRY_DELAY_MS));
+    }
+  }
+  return false;
+};
+
+const stopIdleVideoIfRecording = (proofStatus: 'partial' | 'confirmed'): void => {
+  if (getIdleRecordingStatus() !== 'recording') return;
+  const currentToken = store.get('crm_token') as string | undefined;
+  if (!currentToken || idleRecordingStartMs === null) return;
+  const startMs = idleRecordingStartMs;
+  idleRecordingStartMs = null;
+  agentState.idleRecordingActive = false;
+  stopAndUploadIdleRecording(API_URL, currentToken, toShiftDate(), startMs, proofStatus).catch(() => {});
+  broadcastState();
+};
+
 let agentServicesStarted = false;
 
 const startAgentServices = async (token: string) => {
@@ -999,10 +1030,22 @@ const startAgentServices = async (token: string) => {
         ) {
           const currentToken = store.get("crm_token") as string | undefined;
           if (currentToken) {
-            captureAndUploadOnce(API_URL, currentToken).catch(() => {});
+            const videoWasActive = agentState.idleRecordingActive;
+            captureIdleEvidenceWithRetry(currentToken).then((screenshotOk) => {
+              if (!screenshotOk || (agentState.user?.idleVideoProofEnabled && !videoWasActive)) {
+                reportDiagnostic("idle_evidence_incomplete", "Confirmed-idle alert fired without full evidence", {
+                  screenshotCaptured: screenshotOk,
+                  videoWasActive,
+                  idleVideoProofEnabled: !!agentState.user?.idleVideoProofEnabled,
+                });
+              }
+            });
           }
         }
+
+        stopIdleVideoIfRecording("confirmed");
       } else if (!isIdle && wasIdle) {
+        stopIdleVideoIfRecording("partial");
         // User became active — resume only if clocked in and not on break
         if (wasTracking) {
           activityStartMs = Date.now();
@@ -1027,6 +1070,28 @@ const startAgentServices = async (token: string) => {
         isOnBreak: agentState.isOnBreak,
         platform: process.platform,
       });
+    },
+    async (shouldRecord) => {
+      if (!shouldRecord) return;
+      if (getAuthMode() !== "crm") return;
+      if (!agentState.user?.idleVideoProofEnabled) return;
+      if (getIdleRecordingStatus() !== "idle") return;
+      const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
+      if (!wasTracking || activityStartMs === null) return;
+
+      const started = await startIdleRecording();
+      if (started) {
+        idleRecordingStartMs = Date.now() - getLastIdleSeconds() * 1000;
+        agentState.idleRecordingActive = true;
+        if (Notification.isSupported()) {
+          new Notification({
+            title: "Idle proof recording started",
+            body: "A short screen clip is being recorded as proof of this idle period.",
+            silent: true,
+          }).show();
+        }
+        broadcastState();
+      }
     },
   );
 
@@ -1319,6 +1384,9 @@ const startAgentServices = async (token: string) => {
   resyncIntervalId = setInterval(safeAsync(async () => {
     const currentToken = store.get("crm_token") as string | undefined;
     if (currentToken) await syncShiftState(currentToken);
+    if (currentToken && agentState.user?.idleVideoProofEnabled) {
+      flushIdleRecordingQueue(API_URL, currentToken).catch(() => {});
+    }
   }, 'resync-shift-state'), 60 * 1000);
 
   // Poll for active call state every 10s — drives recording/Autrix menu visibility
@@ -1370,6 +1438,7 @@ const stopAgentServices = () => {
   stopCallStatePolling();
   disconnectTraySocket();
   destroyRecorderWindow();
+  destroyIdleRecorderWindow();
   if (autrixWindow && !autrixWindow.isDestroyed()) {
     autrixWindow.close();
     autrixWindow = null;
@@ -1410,6 +1479,7 @@ const handleLogout = async () => {
     wallClockBaseAt: null,
     // Machine-level, not auth-level — unaffected by signing out.
     screenRecordingGranted: agentState.screenRecordingGranted,
+    idleRecordingActive: false,
   };
   updateTrayIcon();
   tray?.setContextMenu(buildTrayMenu());
@@ -1699,6 +1769,7 @@ app.whenReady().then(async () => {
   app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
   try { autoLauncher.enable(); } catch { } // register with auto-launch as fallback
   registerRecordingIpcHandlers();
+  registerIdleRecordingIpcHandlers();
   startLocalAuthServer();
 
   app.on('render-process-gone', (_e, wc, details) => {
@@ -1785,6 +1856,7 @@ app.whenReady().then(async () => {
       agentState.isIdle = true;
       forceIdleState(true);
       lastResumeForcedIdleAt = Date.now();
+      stopIdleVideoIfRecording('partial');
       stopScreenshots();
       agentState.nextScreenshotIn = null;
       reportDiagnostic('resume_from_suspend', 'System resumed from sleep — forced idle pending real input', {
@@ -1800,6 +1872,7 @@ app.whenReady().then(async () => {
     if (!agentState.isIdle) return;
     agentState.isIdle = false;
     forceIdleState(false);
+    stopIdleVideoIfRecording('partial');
     activityStartMs = Date.now();
     agentState.activityStartMs = activityStartMs;
     const currentToken = store.get('crm_token') as string | undefined;
