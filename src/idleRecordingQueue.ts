@@ -8,6 +8,7 @@ interface QueueEntry {
   filePath: string;
   shiftDate: string;
   idleStartMs: number;
+  chunkIndex: 1 | 2 | 3;
   status: 'partial' | 'confirmed';
 }
 
@@ -27,12 +28,12 @@ function saveQueue(queue: QueueEntry[]): void {
   fs.writeFileSync(QUEUE_FILE, JSON.stringify(queue, null, 2));
 }
 
-export function enqueueIdleRecording(buffer: Buffer, shiftDate: string, idleStartMs: number, status: 'partial' | 'confirmed'): void {
+export function enqueueIdleRecording(buffer: Buffer, shiftDate: string, idleStartMs: number, chunkIndex: 1 | 2 | 3, status: 'partial' | 'confirmed'): void {
   if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
-  const filePath = path.join(CACHE_DIR, `${idleStartMs}-${status}.webm`);
+  const filePath = path.join(CACHE_DIR, `${idleStartMs}-${chunkIndex}-${status}.webm`);
   fs.writeFileSync(filePath, buffer);
   const queue = loadQueue();
-  queue.push({ filePath, shiftDate, idleStartMs, status });
+  queue.push({ filePath, shiftDate, idleStartMs, chunkIndex, status });
   saveQueue(queue);
 }
 
@@ -54,6 +55,7 @@ export async function flushIdleRecordingQueue(apiUrl: string, token: string): Pr
       });
       form.append('shiftDate', entry.shiftDate);
       form.append('idleStartMs', String(entry.idleStartMs));
+      form.append('chunkIndex', String(entry.chunkIndex));
       form.append('status', entry.status);
 
       await axios.post(`${apiUrl}/api/crm/timeproof/idle-recordings`, form, {

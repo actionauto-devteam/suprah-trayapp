@@ -15,19 +15,91 @@ autoUpdater.logger = null;
 
 
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // backstop: re-check every 30 minutes
+// Caps how long a downloaded update can wait for the current shift to end before installing
+// anyway — mirrors the NO_DATA_GRACE_HOURS safety-cap philosophy in
+// staleShiftAutoClockout.scheduler.ts: an unusually long single shift shouldn't be able to
+// indefinitely block a pending update.
+const PENDING_UPDATE_INSTALL_CAP_MS = 16 * 60 * 60 * 1000;
+
+// Guards the three independent update-check trigger sites (15s-after-boot, 30-min periodic
+// backstop, every socket reconnect) against firing checkForUpdates() concurrently — previously a
+// reconnect landing close to the periodic backstop could produce two checks ~60s apart with
+// contradictory results (one reporting a version available, the next reporting "already on
+// latest" for the same check).
+let updateCheckState: 'idle' | 'checking' | 'available' = 'idle';
+const requestUpdateCheck = (): void => {
+  if (!app.isPackaged || updateCheckState !== 'idle') return;
+  updateCheckState = 'checking';
+  autoUpdater.checkForUpdates().catch(() => { updateCheckState = 'idle'; });
+};
+
+// Deferred-install state — see the 'update-downloaded' handler below and checkDeferredInstall().
+let pendingUpdateInstall = false;
+let pendingUpdateInstallSetAt = 0;
+let updateInstallInProgress = false;
+
+const runQuitAndInstall = async (): Promise<void> => {
+  if (updateInstallInProgress) return;
+  updateInstallInProgress = true;
+  const deferredForMs = pendingUpdateInstall ? Date.now() - pendingUpdateInstallSetAt : 0;
+  reportDiagnostic('autoupdate_installing', 'Installing downloaded update', {
+    wasDeferred: pendingUpdateInstall,
+    deferredForMs,
+    wasOnShift: agentState.isOnShift,
+  });
+  try {
+    store.set('pendingUpdateRelaunchAt', Date.now());
+  } catch {
+  }
+  if (activityStartMs !== null) {
+    await commitActiveSegment(new Date());
+  }
+  await waitForCaptureToFinish();
+  autoUpdater.quitAndInstall(true, true);
+};
+
+// Called from broadcastState() (already fired after every clock action, idle transition, and
+// break event) — the natural point to notice a deferred install's shift has since ended, without
+// needing to separately hook every individual time-out code path (manual clock-out, socket-
+// pushed auto-close, the tray's own 35-min local fallback, the staged-escalation auto-end).
+const checkDeferredInstall = (): void => {
+  if (!pendingUpdateInstall || updateInstallInProgress) return;
+  const pastSafetyCap = Date.now() - pendingUpdateInstallSetAt > PENDING_UPDATE_INSTALL_CAP_MS;
+  if (!agentState.isOnShift || pastSafetyCap) {
+    runQuitAndInstall().catch(() => {});
+  }
+};
 
 // Platform-wide fatal error before per-org processing, notify all admins.
 autoUpdater.on('error', (err) => {
+  updateCheckState = 'idle';
   reportDiagnostic('autoupdate_error', 'Auto-updater error', { error: err?.message || String(err), platform: process.platform });
 });
 autoUpdater.on('update-not-available', () => {
+  updateCheckState = 'idle';
   reportDiagnostic('autoupdate_check_ok', 'Auto-updater checked — already on latest version', { platform: process.platform, version: app.getVersion() });
 });
 autoUpdater.on('update-available', (info) => {
+  updateCheckState = 'available';
   reportDiagnostic('autoupdate_available', 'Auto-updater found a new version', { platform: process.platform, currentVersion: app.getVersion(), newVersion: info?.version });
 });
 
 autoUpdater.on('update-downloaded', () => {
+  // Still on shift — defer the disruptive quit+install until the shift ends (checkDeferredInstall,
+  // called from broadcastState) instead of interrupting active tracking mid-work. Off-shift means
+  // nothing is being tracked right now anyway, so install proceeds on the original short delay.
+  if (agentState.isOnShift) {
+    pendingUpdateInstall = true;
+    pendingUpdateInstallSetAt = Date.now();
+    if (Notification.isSupported()) {
+      new Notification({
+        title: "Update ready",
+        body: "A new version of Suprah AI - Timeproof Clock was downloaded and will install automatically once you end your shift.",
+        silent: true,
+      }).show();
+    }
+    return;
+  }
   if (Notification.isSupported()) {
     new Notification({
       title: "Update ready",
@@ -35,14 +107,7 @@ autoUpdater.on('update-downloaded', () => {
       silent: true,
     }).show();
   }
-  // Silent auto-update: flush tracked data first, then quitAndInstall to avoid losing active segment.
-  setTimeout(async () => {
-    if (activityStartMs !== null) {
-      await commitActiveSegment(new Date());
-    }
-    await waitForCaptureToFinish();
-    autoUpdater.quitAndInstall(true, true);
-  }, 10_000);
+  setTimeout(() => { runQuitAndInstall().catch(() => {}); }, 10_000);
 });
 const envPath = app.isPackaged
   ? path.join(process.resourcesPath, '.env')
@@ -80,6 +145,7 @@ const getAuthMode = (): 'crm' | 'main' => (store.get('auth_mode') as 'crm' | 'ma
 const getShiftStateUrl  = () => getAuthMode() === 'main' ? '/api/timeclock/shift-state'      : '/api/crm/timeproof/shift-state';
 const getActivityIntervalUrl = () => getAuthMode() === 'main' ? '/api/timeclock/activity-interval' : '/api/crm/timeproof/activity-interval';
 const getResumableShiftUrl   = () => getAuthMode() === 'main' ? '/api/timeclock/resumable-shift'   : '/api/crm/timeproof/resumable-shift';
+const getResumeShiftActionUrl = () => getAuthMode() === 'main' ? '/api/timeclock/resume-shift'      : '/api/crm/timeproof/resume-shift';
 const getClockUrl            = () => getAuthMode() === 'main' ? '/api/timeclock/clock'             : '/api/crm/time-clock';
 
 /* ─────────────────────────────────────────────────────────────────
@@ -179,13 +245,23 @@ let breakNotifyIntervalId: ReturnType<typeof setInterval> | null = null;
 let screenRecordingCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let lastNotifiedScreenRecordingMissing = false;
 let resyncIntervalId: ReturnType<typeof setInterval> | null = null;
+let departmentFlagsRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
 let autoClockoutCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let breakExceededNotified = false;
 let autoClockoutTriggeredForThisIdleStretch = false;
 
 // Minimum rendered hours before auto-clock-out triggers (idle timeout or sleep/shutdown) can apply.
 const AUTO_CLOCKOUT_RENDERED_HOURS_MS = 8 * 60 * 60 * 1000;
-const AUTO_CLOCKOUT_IDLE_MS = 30 * 60 * 1000;
+// Last-resort fallback only — the primary 30-minute auto-end now lives on the
+// backend (staged idle escalation, see idle.ts's stage2/stage3 thresholds +
+// postHeartbeat), which is clamp-protected and evidence-attached. This raw,
+// unprotected local check only fires if the backend genuinely couldn't be
+// reached (no live 'time-out' socket push arrived before this later mark) —
+// bumped 5 minutes past the backend's own 30-minute mark so it never races
+// the normal case, and its note is deliberately distinguishable so a fallback
+// firing is diagnosable rather than silently indistinguishable from the
+// primary path.
+const AUTO_CLOCKOUT_IDLE_MS = 35 * 60 * 1000;
 
 /**
  * Rendered active ms for current shift (breaks excluded), from authoritative
@@ -200,7 +276,11 @@ const getRenderedMsSoFar = (): number =>
 // the basis for the displayed timer or auto-clockout hour-threshold checks.
 let activityStartMs: number | null = null;  // when current active period began (local clock)
 let todayTotalActiveMs: number = 0;         // sum of completed active interval durations
-let idleRecordingStartMs: number | null = null;
+// Constant onset of the whole idle stretch, shared across all 3 video chunks
+// (1: 0-10min, 2: 10-20min, 3: 20-30min) so they group under the same backend
+// storage key — set once when chunk 1 starts, untouched by later chunk starts.
+let idleStretchStartMs: number | null = null;
+let currentIdleChunkIndex: 1 | 2 | 3 | null = null;
 
 // Authoritative wall-clock baseline — see AgentState.wallClockBaseMs/wallClockBaseAt.
 let wallClockBaseMs: number = 0;
@@ -241,6 +321,7 @@ const SCREEN_RECORDING_BANNER_HEIGHT = 60;
 let lastTraySignature = '';
 
 const broadcastState = () => {
+  checkDeferredInstall();
   if (statusWindow && !statusWindow.isDestroyed()) {
     const callState = getCurrentCall();
     const targetH = (callState ? STATUS_HEIGHT_CALL : STATUS_HEIGHT_BASE)
@@ -876,9 +957,9 @@ const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
 const CAPTURE_RETRY_ATTEMPTS = 3;
 const CAPTURE_RETRY_DELAY_MS = 3_000;
 
-const captureIdleEvidenceWithRetry = async (token: string): Promise<boolean> => {
+const captureIdleEvidenceWithRetry = async (token: string, idleStage?: 1 | 2 | 3): Promise<boolean> => {
   for (let attempt = 1; attempt <= CAPTURE_RETRY_ATTEMPTS; attempt++) {
-    const ok = await captureAndUploadOnce(API_URL, token);
+    const ok = await captureAndUploadOnce(API_URL, token, true, undefined, idleStage);
     if (ok) return true;
     if (attempt < CAPTURE_RETRY_ATTEMPTS) {
       await new Promise((r) => setTimeout(r, CAPTURE_RETRY_DELAY_MS));
@@ -887,15 +968,54 @@ const captureIdleEvidenceWithRetry = async (token: string): Promise<boolean> => 
   return false;
 };
 
-const stopIdleVideoIfRecording = (proofStatus: 'partial' | 'confirmed'): void => {
+// clearStretch defaults to true only for 'partial' (the whole idle stretch ended because
+// activity resumed) — a 'confirmed' stop at a stage boundary (chunk 1->2, chunk 2->3) keeps
+// the stretch anchor alive since a new chunk starts immediately after. Stage 3's 'confirmed'
+// stop passes clearStretch explicitly, since no chunk 4 follows (the shift is auto-ending).
+const stopIdleVideoIfRecording = (proofStatus: 'partial' | 'confirmed', clearStretch: boolean = proofStatus === 'partial'): void => {
   if (getIdleRecordingStatus() !== 'recording') return;
   const currentToken = store.get('crm_token') as string | undefined;
-  if (!currentToken || idleRecordingStartMs === null) return;
-  const startMs = idleRecordingStartMs;
-  idleRecordingStartMs = null;
+  if (!currentToken || idleStretchStartMs === null || currentIdleChunkIndex === null) return;
+  const startMs = idleStretchStartMs;
+  const chunkIndex = currentIdleChunkIndex;
   agentState.idleRecordingActive = false;
-  stopAndUploadIdleRecording(API_URL, currentToken, toShiftDate(), startMs, proofStatus).catch(() => {});
+  stopAndUploadIdleRecording(API_URL, currentToken, toShiftDate(), startMs, chunkIndex, proofStatus).catch(() => {});
+  if (clearStretch) {
+    idleStretchStartMs = null;
+    currentIdleChunkIndex = null;
+  }
   broadcastState();
+};
+
+// Starts one idle-video chunk (1, 2, or 3). Chunk 1 establishes idleStretchStartMs (the
+// backdated true onset of the stretch); chunks 2/3 reuse it so all chunks of the same idle
+// stretch group under one backend storage key. Common gates (CRM mode, department toggle,
+// recorder free, still on-shift) apply to every chunk; chunk-specific pre-checks (e.g. chunk
+// 1's activityStartMs guard) are the caller's responsibility.
+const startIdleVideoChunk = async (chunkIndex: 1 | 2 | 3): Promise<boolean> => {
+  if (getAuthMode() !== "crm") return false;
+  if (!agentState.user?.idleVideoProofEnabled) return false;
+  if (getIdleRecordingStatus() !== "idle") return false;
+  const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
+  if (!wasTracking) return false;
+
+  const started = await startIdleRecording();
+  if (!started) return false;
+
+  if (chunkIndex === 1) {
+    idleStretchStartMs = Date.now() - getLastIdleSeconds() * 1000;
+  }
+  currentIdleChunkIndex = chunkIndex;
+  agentState.idleRecordingActive = true;
+  if (chunkIndex === 1 && Notification.isSupported()) {
+    new Notification({
+      title: "Idle proof recording started",
+      body: "A short screen clip is being recorded as proof of this idle period.",
+      silent: true,
+    }).show();
+  }
+  broadcastState();
+  return true;
 };
 
 let agentServicesStarted = false;
@@ -1032,7 +1152,7 @@ const startAgentServices = async (token: string) => {
           const currentToken = store.get("crm_token") as string | undefined;
           if (currentToken) {
             const videoWasActive = agentState.idleRecordingActive;
-            captureIdleEvidenceWithRetry(currentToken).then((screenshotOk) => {
+            captureIdleEvidenceWithRetry(currentToken, 1).then((screenshotOk) => {
               if (!screenshotOk || (agentState.user?.idleVideoProofEnabled && !videoWasActive)) {
                 reportDiagnostic("idle_evidence_incomplete", "Confirmed-idle alert fired without full evidence", {
                   screenshotCaptured: screenshotOk,
@@ -1044,7 +1164,12 @@ const startAgentServices = async (token: string) => {
           }
         }
 
+        // Chunk 1 (started at the 60s recording-trigger) ends here; immediately
+        // start chunk 2 so the 10-20min window is also covered, not just 1-10min.
         stopIdleVideoIfRecording("confirmed");
+        if (hadOpenSegment) {
+          startIdleVideoChunk(2);
+        }
       } else if (!isIdle && wasIdle) {
         stopIdleVideoIfRecording("partial");
         // User became active — resume only if clocked in and not on break
@@ -1074,25 +1199,42 @@ const startAgentServices = async (token: string) => {
     },
     async (shouldRecord) => {
       if (!shouldRecord) return;
-      if (getAuthMode() !== "crm") return;
-      if (!agentState.user?.idleVideoProofEnabled) return;
-      if (getIdleRecordingStatus() !== "idle") return;
       const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
       if (!wasTracking || activityStartMs === null) return;
+      await startIdleVideoChunk(1);
+    },
+    async (stage, idleSeconds) => {
+      // Stages 2 (20min) and 3 (30min) — stage 1 (10min) is the existing
+      // isIdle transition above, unchanged. Each stage stops the chunk that's
+      // been recording since the previous stage, captures a fresh stage-
+      // tagged screenshot, and (stage 2 only) starts the next chunk — stage 3
+      // starts no further chunk since the shift is about to auto-end.
+      if (getAuthMode() !== "crm") return;
+      const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
+      if (!wasTracking) return;
+      const currentToken = store.get("crm_token") as string | undefined;
+      if (!currentToken) return;
 
-      const started = await startIdleRecording();
-      if (started) {
-        idleRecordingStartMs = Date.now() - getLastIdleSeconds() * 1000;
-        agentState.idleRecordingActive = true;
-        if (Notification.isSupported()) {
-          new Notification({
-            title: "Idle proof recording started",
-            body: "A short screen clip is being recorded as proof of this idle period.",
-            silent: true,
-          }).show();
-        }
-        broadcastState();
+      stopIdleVideoIfRecording("confirmed", stage === 3);
+
+      if (!agentState.user?.screenshotExempt) {
+        captureIdleEvidenceWithRetry(currentToken, stage).then((screenshotOk) => {
+          if (!screenshotOk) {
+            reportDiagnostic("idle_evidence_incomplete", "Idle escalation stage fired without a screenshot", {
+              stage,
+              idleSeconds,
+            });
+          }
+        });
       }
+
+      if (stage === 2) {
+        await startIdleVideoChunk(3);
+      }
+
+      pingHeartbeat();
+      reportDiagnostic("idle_stage_reached", "Idle escalation stage reached", { stage, idleSeconds });
+      broadcastState();
     },
   );
 
@@ -1144,14 +1286,15 @@ const startAgentServices = async (token: string) => {
     }
   }, 30_000);
 
-  // Auto clock-out: 30 continuous minutes of no keyboard/mouse input while
-  // still clocked in is treated as "done and forgot to end shift" — checked
-  // regardless of hours already rendered. Previously gated behind 8+ hours
-  // rendered, which meant an early-out (e.g. someone who stops working after
-  // only a few hours and simply forgets/fails to click End Shift) had no
-  // protection at all and could sit "on shift" idle for the rest of the day.
+  // Local last-resort fallback only (see AUTO_CLOCKOUT_IDLE_MS above) — the
+  // primary "done and forgot to end shift" auto-clockout is now the backend's
+  // staged idle escalation (stage 3, 30 min), which is clamp-protected and
+  // evidence-attached. This raw 35-min check exists purely so a shift still
+  // ends eventually if the backend is genuinely unreachable — checked
+  // regardless of hours already rendered, same reasoning as before (an
+  // early-out with only a few hours rendered still needs protection).
   // Checked every 60s against the OS's own idle-time counter (not our 30s
-  // poll cadence) so it fires close to the 30-minute mark regardless of when
+  // poll cadence) so it fires close to the 35-minute mark regardless of when
   // the last check happened to run.
   autoClockoutTriggeredForThisIdleStretch = false;
   autoClockoutCheckIntervalId = setInterval(safeAsync(async () => {
@@ -1169,7 +1312,7 @@ const startAgentServices = async (token: string) => {
     autoClockoutTriggeredForThisIdleStretch = true;
     const result = await performClockAction(
       "time-out",
-      "Auto clock-out — 30+ minutes without activity",
+      "Auto clock-out — idle 35+ minutes (local fallback — backend unreachable)",
     );
     if (result.success && Notification.isSupported()) {
       new Notification({
@@ -1364,7 +1507,7 @@ const startAgentServices = async (token: string) => {
       if (currentToken) syncShiftState(currentToken);
     },
     () => {
-      if (app.isPackaged) autoUpdater.checkForUpdates().catch(() => {});
+      requestUpdateCheck();
     },
   );
 
@@ -1389,6 +1532,42 @@ const startAgentServices = async (token: string) => {
       flushIdleRecordingQueue(API_URL, currentToken).catch(() => {});
     }
   }, 'resync-shift-state'), 60 * 1000);
+
+  // Re-fetch department-level flags (idleVideoProofEnabled, mainMonitorOnly,
+  // idleDetectionExempt, screenshotsRequired) from /api/crm/me periodically — these were
+  // previously only ever captured once, at the moment of a fresh browser-pushed login
+  // (handleTrayAuth). A plain app restart reloads the SAME stale cached user object from
+  // electron-store rather than re-fetching, so an admin toggling a department setting
+  // mid-session (or between sessions, without the affected employee doing a genuine fresh web
+  // login) saw the change silently never take effect — e.g. idleVideoProofEnabled staying
+  // false forever, with every video-recording gate quietly no-op'ing and no diagnostic to
+  // explain why. Run once shortly after startup (not just on the first 5-min tick) so a
+  // recently-flipped toggle self-heals quickly, then keep re-checking periodically.
+  const refreshDepartmentFlags = async (): Promise<void> => {
+    if (getAuthMode() !== "crm") return;
+    const currentToken = store.get("crm_token") as string | undefined;
+    if (!currentToken) return;
+    try {
+      const { data } = await axios.get(`${API_URL}/api/crm/me`, {
+        headers: { Authorization: `Bearer ${currentToken}` },
+        timeout: 10_000,
+      });
+      const fresh: User = data?.data || data;
+      if (!fresh?.fullName) return;
+
+      agentState.user = { ...agentState.user, ...fresh } as User;
+      store.set("user", agentState.user);
+
+      setMainMonitorOnly(!!fresh.mainMonitorOnly);
+      setIdleDetectionExempt(!!fresh.idleDetectionExempt);
+      setSkipCaptures(!!fresh.screenshotExempt || fresh.screenshotsRequired === false);
+      broadcastState();
+    } catch {
+      // Best-effort — keep whatever flags are already cached; next tick retries.
+    }
+  };
+  setTimeout(safeAsync(refreshDepartmentFlags, 'department-flags-refresh-initial'), 30_000);
+  departmentFlagsRefreshIntervalId = setInterval(safeAsync(refreshDepartmentFlags, 'department-flags-refresh'), 5 * 60 * 1000);
 
   // Poll for active call state every 10s — drives recording/Autrix menu visibility
   startCallStatePolling(
@@ -1416,6 +1595,10 @@ const stopAgentServices = () => {
   if (resyncIntervalId) {
     clearInterval(resyncIntervalId);
     resyncIntervalId = null;
+  }
+  if (departmentFlagsRefreshIntervalId) {
+    clearInterval(departmentFlagsRefreshIntervalId);
+    departmentFlagsRefreshIntervalId = null;
   }
   if (autoClockoutCheckIntervalId) {
     clearInterval(autoClockoutCheckIntervalId);
@@ -1510,6 +1693,25 @@ ipcMain.handle('shift:check-resumable', async () => {
     return data?.data ?? { resumable: false };
   } catch {
     return { resumable: false };
+  }
+});
+
+// Actually continues the original, still-open time-in (deletes the auto-close time-out
+// server-side) — previously the tray's "Yes, Resume Shift" button had no way to call this at
+// all and fell back to a plain new time-in exactly like "No, Start a New Shift", so choosing
+// "Yes" silently never resumed anything despite its label.
+ipcMain.handle('shift:resume', async () => {
+  const token = store.get('crm_token') as string | undefined;
+  if (!token) return { success: false, error: 'Not authenticated' };
+  try {
+    await axios.post(`${API_URL}${getResumeShiftActionUrl()}`, {}, {
+      headers: { Authorization: `Bearer ${token}` },
+      timeout: 15_000,
+    });
+    await syncShiftState(token);
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.response?.data?.message || 'Failed to resume shift' };
   }
 });
 
@@ -1934,11 +2136,34 @@ app.whenReady().then(async () => {
   // so a single launch-time check isn't enough to catch a new release promptly.
   if (app.isPackaged) {
     setTimeout(() => {
-      autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+      if (updateCheckState !== 'idle') return;
+      updateCheckState = 'checking';
+      autoUpdater.checkForUpdatesAndNotify().catch(() => { updateCheckState = 'idle'; });
     }, 15_000);
     setInterval(() => {
-      autoUpdater.checkForUpdates().catch(() => {});
+      requestUpdateCheck();
     }, UPDATE_CHECK_INTERVAL_MS);
+
+    // If we're back up after installing a deferred/immediate update, the marker set right
+    // before quitAndInstall() is still there — report exactly how long the gap was instead of
+    // leaving this window a total blind spot (see runQuitAndInstall/checkDeferredInstall).
+    // Delayed so screenshot.ts's apiUrl/token are set (via startScreenshots, part of the normal
+    // become-active flow) before reportDiagnostic is attempted — a plain restart with nothing
+    // pending is a instant no-op read.
+    setTimeout(() => {
+      try {
+        const relaunchMarker = store.get('pendingUpdateRelaunchAt') as number | undefined;
+        if (relaunchMarker) {
+          store.delete('pendingUpdateRelaunchAt');
+          reportDiagnostic('autoupdate_relaunch_complete', 'Tray relaunched after installing an update', {
+            gapMs: Date.now() - relaunchMarker,
+            platform: process.platform,
+            version: app.getVersion(),
+          });
+        }
+      } catch {
+      }
+    }, 20_000);
   }
 });
 

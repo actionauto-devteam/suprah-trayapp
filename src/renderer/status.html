@@ -792,7 +792,12 @@
       btn.disabled = true;
       try {
         const resumable = await window.trayAPI.checkResumableShift();
-        if (resumable?.resumable && resumable?.originalClockIn) {
+        // Only prompt when the shift was genuinely auto-ended (canSeamlessResume) — a normal,
+        // deliberate "End Shift" click also leaves resumable=true (there's an open time-out
+        // today with nothing clocked back in since), which previously showed this same modal
+        // for every ordinary end-of-day clock-out. See timeproof-clock/page.tsx's
+        // checkResumableAndStart for the matching web-side fix.
+        if (resumable?.resumable && resumable?.originalClockIn && resumable?.canSeamlessResume) {
           document.getElementById('resumeOriginalTime').textContent = fmtMDT(resumable.originalClockIn);
           document.getElementById('resumeModal').classList.add('visible');
           btn.disabled = false;
@@ -803,9 +808,17 @@
       doTimeIn();
     });
 
-    document.getElementById('resumeYesBtn').addEventListener('click', () => {
+    document.getElementById('resumeYesBtn').addEventListener('click', async () => {
       document.getElementById('resumeModal').classList.remove('visible');
-      doTimeIn();
+      const btn = document.getElementById('startShiftBtn');
+      btn.disabled = true;
+      // Actually continue the original clock-in (deletes the auto-close time-out
+      // server-side) instead of doTimeIn(), which "No, Start a New Shift" already
+      // correctly uses — previously both buttons called the same doTimeIn(), so "Yes"
+      // silently created a brand-new time-in exactly like "No" despite its label.
+      const result = await window.trayAPI.resumeShift();
+      btn.disabled = false;
+      if (!result.success) showMsg(result.error || 'Failed to resume shift', true);
     });
 
     document.getElementById('resumeNoBtn').addEventListener('click', () => {

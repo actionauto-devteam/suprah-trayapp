@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('trayAPI', {
   openCRM: () => ipcRenderer.invoke('app:open-crm'),
   timeclockAction: (type: string, note?: string) => ipcRenderer.invoke('timeclock:action', type, note),
   checkResumableShift: () => ipcRenderer.invoke('shift:check-resumable'),
+  resumeShift: () => ipcRenderer.invoke('shift:resume'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   openScreenRecordingSettings: () => ipcRenderer.invoke('app:open-screen-recording-settings'),
 

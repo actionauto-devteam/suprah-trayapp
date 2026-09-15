@@ -125,6 +125,7 @@ export async function stopAndUploadIdleRecording(
   authToken: string,
   shiftDate: string,
   idleStartMs: number,
+  chunkIndex: 1 | 2 | 3,
   proofStatus: 'partial' | 'confirmed',
 ): Promise<void> {
   if (status !== 'recording') return;
@@ -142,9 +143,10 @@ export async function stopAndUploadIdleRecording(
     flushIdleRecordingQueue(apiUrl, authToken).catch(() => {});
 
     const form = new FormData();
-    form.append('recording', webmBuffer, { filename: `${idleStartMs}.webm`, contentType: 'video/webm' });
+    form.append('recording', webmBuffer, { filename: `${idleStartMs}-${chunkIndex}.webm`, contentType: 'video/webm' });
     form.append('shiftDate', shiftDate);
     form.append('idleStartMs', String(idleStartMs));
+    form.append('chunkIndex', String(chunkIndex));
     form.append('status', proofStatus);
 
     await axios.post(`${apiUrl}/api/crm/timeproof/idle-recordings`, form, {
@@ -153,12 +155,12 @@ export async function stopAndUploadIdleRecording(
     });
 
     setStatus('idle');
-    reportDiagnostic('idle_recording_uploaded', 'Idle proof recording uploaded', { proofStatus, bytes: webmBuffer.length });
+    reportDiagnostic('idle_recording_uploaded', 'Idle proof recording uploaded', { proofStatus, chunkIndex, bytes: webmBuffer.length });
   } catch (err) {
     setStatus('idle');
     if (webmBuffer) {
       try {
-        enqueueIdleRecording(webmBuffer, shiftDate, idleStartMs, proofStatus);
+        enqueueIdleRecording(webmBuffer, shiftDate, idleStartMs, chunkIndex, proofStatus);
         reportDiagnostic('idle_recording_queued_for_retry', 'Idle proof recording upload failed — queued locally for retry', {
           error: err instanceof Error ? err.message : String(err),
         });

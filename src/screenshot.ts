@@ -421,6 +421,7 @@ export async function captureAndUploadOnce(
   authToken: string,
   idleDetected: boolean = true,
   breakEvent?: 'break-in' | 'break-out',
+  idleStage?: 1 | 2 | 3,
 ): Promise<boolean> {
   try {
     const jpegBuffer = await captureAllScreens();
@@ -436,6 +437,7 @@ export async function captureAndUploadOnce(
       form.append('capturedAt', capturedAt);
       form.append('idleDetected', String(idleDetected));
       if (breakEvent) form.append('breakEvent', breakEvent);
+      if (idleStage) form.append('idleStage', String(idleStage));
 
       await axios.post(`${url}/api/crm/timeproof/screenshots`, form, {
         headers: { ...form.getHeaders(), Authorization: `Bearer ${authToken}` },
@@ -463,6 +465,14 @@ export function startScreenshots(url: string, authToken: string): void {
   token = authToken;
   lastCaptureOutcomeAt = Date.now(); // baseline — otherwise the watchdog sees a "stall" instantly on startup
   intervalId = setInterval(captureAndUpload, INTERVAL_MS);
+
+  // Capture right away instead of waiting out the first full INTERVAL_MS — setInterval only
+  // fires on its trailing edge, so without this, any restart of tracking (fresh boot, socket
+  // reconnect, resume from idle/break, post-auto-update relaunch) left up to a full 10 minutes
+  // with zero screenshot evidence on top of whatever the restart itself already cost. Safe to
+  // call unconditionally here: captureAndUpload's own idle/break/in-flight guards make this a
+  // no-op if conditions aren't right at this exact instant.
+  captureAndUpload();
 
   // Self-healing watchdog: if we've been actively (non-idle, non-break)
   // eligible to capture for well over two full cycles with zero successful

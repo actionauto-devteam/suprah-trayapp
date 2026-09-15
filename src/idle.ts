@@ -1,13 +1,21 @@
 import { powerMonitor } from 'electron';
 
-export const IDLE_THRESHOLD_SEC = 10 * 60;
-export const RECORDING_TRIGGER_THRESHOLD_SEC = 60;
+const DEBUG_SCALE = Number(process.env.TIMEPROOF_IDLE_DEBUG_SCALE) || 1;
+if (DEBUG_SCALE !== 1) {
+  console.warn(`[idle] TIMEPROOF_IDLE_DEBUG_SCALE=${DEBUG_SCALE} active — idle thresholds are NOT production values`);
+}
+
+export const IDLE_THRESHOLD_SEC = (10 * 60) / DEBUG_SCALE;
+export const IDLE_STAGE2_THRESHOLD_SEC = (20 * 60) / DEBUG_SCALE;
+export const IDLE_STAGE3_THRESHOLD_SEC = (30 * 60) / DEBUG_SCALE;
+export const RECORDING_TRIGGER_THRESHOLD_SEC = 60 / DEBUG_SCALE;
 const CHECK_INTERVAL_MS = 30_000;
 const CONSECUTIVE_IDLE_SAMPLES_TO_TRIP = 2;
 const FROZEN_TIMER_GAP_MS = CHECK_INTERVAL_MS * 3;
 
 type IdleCallback = (isIdle: boolean) => void;
 type RecordingThresholdCallback = (shouldRecord: boolean) => void;
+type IdleStageCallback = (stage: 2 | 3, idleSeconds: number) => void;
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let lastIdleState = false;
@@ -17,6 +25,9 @@ let lastTickAt = 0;
 let previousIdleSecondsSample = 0;
 let recordingTriggerState = false;
 let recordingTriggerStreak = 0;
+let stage2Streak = 0;
+let stage3Streak = 0;
+let lastIdleStage: 0 | 1 | 2 | 3 = 0;
 
 export function getLastIdleSeconds(): number {
   return lastIdleSeconds;
@@ -41,6 +52,7 @@ export function startIdleMonitor(
   onIdleChange: IdleCallback,
   onPeriodicCheck?: (idleSeconds: number, exempt: boolean) => void,
   onRecordingThreshold?: RecordingThresholdCallback,
+  onIdleStageChange?: IdleStageCallback,
 ): void {
   if (intervalId) return;
 
@@ -63,6 +75,8 @@ export function startIdleMonitor(
     if (wallGapMs > FROZEN_TIMER_GAP_MS) {
       idleSampleStreak = 0;
       recordingTriggerStreak = 0;
+      stage2Streak = 0;
+      stage3Streak = 0;
       previousIdleSecondsSample = idleSeconds;
       if (lastIdleState) {
         lastIdleState = false;
@@ -72,6 +86,7 @@ export function startIdleMonitor(
         recordingTriggerState = false;
         onRecordingThreshold?.(false);
       }
+      lastIdleStage = 0;
       return;
     }
 
@@ -81,6 +96,8 @@ export function startIdleMonitor(
     if (idleGrowth > plausibleMaxGrowth) {
       idleSampleStreak = 0;
       recordingTriggerStreak = 0;
+      stage2Streak = 0;
+      stage3Streak = 0;
       return;
     }
 
@@ -96,6 +113,18 @@ export function startIdleMonitor(
       recordingTriggerStreak = 0;
     }
 
+    if (idleSeconds >= IDLE_STAGE2_THRESHOLD_SEC) {
+      stage2Streak += 1;
+    } else {
+      stage2Streak = 0;
+    }
+
+    if (idleSeconds >= IDLE_STAGE3_THRESHOLD_SEC) {
+      stage3Streak += 1;
+    } else {
+      stage3Streak = 0;
+    }
+
     const isIdle = idleSampleStreak >= CONSECUTIVE_IDLE_SAMPLES_TO_TRIP
       ? true
       : idleSampleStreak === 0
@@ -108,6 +137,9 @@ export function startIdleMonitor(
         ? false
         : recordingTriggerState;
 
+    const stage2Confirmed = stage2Streak >= CONSECUTIVE_IDLE_SAMPLES_TO_TRIP;
+    const stage3Confirmed = stage3Streak >= CONSECUTIVE_IDLE_SAMPLES_TO_TRIP;
+
     if (isIdle !== lastIdleState) {
       lastIdleState = isIdle;
       onIdleChange(isIdle);
@@ -116,6 +148,14 @@ export function startIdleMonitor(
     if (shouldRecord !== recordingTriggerState) {
       recordingTriggerState = shouldRecord;
       onRecordingThreshold?.(shouldRecord);
+    }
+
+    const nextIdleStage: 0 | 1 | 2 | 3 = !isIdle ? 0 : stage3Confirmed ? 3 : stage2Confirmed ? 2 : 1;
+    if (nextIdleStage !== lastIdleStage) {
+      if ((nextIdleStage === 2 || nextIdleStage === 3) && nextIdleStage > lastIdleStage) {
+        onIdleStageChange?.(nextIdleStage, idleSeconds);
+      }
+      lastIdleStage = nextIdleStage;
     }
   }, CHECK_INTERVAL_MS);
 }
@@ -132,6 +172,9 @@ export function stopIdleMonitor(): void {
   previousIdleSecondsSample = 0;
   recordingTriggerState = false;
   recordingTriggerStreak = 0;
+  stage2Streak = 0;
+  stage3Streak = 0;
+  lastIdleStage = 0;
 }
 
 export function getIsIdle(): boolean {
@@ -147,6 +190,9 @@ export function forceIdleState(value: boolean): void {
   idleSampleStreak = value ? CONSECUTIVE_IDLE_SAMPLES_TO_TRIP : 0;
   recordingTriggerState = value;
   recordingTriggerStreak = value ? CONSECUTIVE_IDLE_SAMPLES_TO_TRIP : 0;
+  stage2Streak = 0;
+  stage3Streak = 0;
+  lastIdleStage = value ? 1 : 0;
   lastTickAt = 0;
   previousIdleSecondsSample = 0;
 }
