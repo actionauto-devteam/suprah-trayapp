@@ -968,6 +968,7 @@ const startAgentServices = async (token: string) => {
           }
           updateHeartbeatToken(refreshed);
           updateSocketToken(refreshed);
+          updateScreenshotToken(refreshed);
         }, 'token-refresh'), TOKEN_REFRESH_INTERVAL_MS)
       : null;
 
