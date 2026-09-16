@@ -792,12 +792,11 @@
       btn.disabled = true;
       try {
         const resumable = await window.trayAPI.checkResumableShift();
-        // Only prompt when the shift was genuinely auto-ended (canSeamlessResume) — a normal,
-        // deliberate "End Shift" click also leaves resumable=true (there's an open time-out
-        // today with nothing clocked back in since), which previously showed this same modal
-        // for every ordinary end-of-day clock-out. See timeproof-clock/page.tsx's
-        // checkResumableAndStart for the matching web-side fix.
-        if (resumable?.resumable && resumable?.originalClockIn && resumable?.canSeamlessResume) {
+        // Prompt whenever there's an open time-out today with nothing clocked back in since —
+        // "Yes, Resume Shift" always actually resumes the original clock-in now (backend
+        // deletes the closing time-out regardless of whether it was an auto-clockout or a
+        // deliberate manual "End Shift"), and "No, Start a New Shift" always starts fresh.
+        if (resumable?.resumable && resumable?.originalClockIn) {
           document.getElementById('resumeOriginalTime').textContent = fmtMDT(resumable.originalClockIn);
           document.getElementById('resumeModal').classList.add('visible');
           btn.disabled = false;
@@ -827,9 +826,22 @@
     });
 
     document.getElementById('breakBtn').addEventListener('click', async () => {
+      const type = state.isOnBreak ? 'break-out' : 'break-in';
+      // Same spot toggles between "start break" and "end break" — a stray second click right
+      // after starting (bumping the mouse/trackpad while standing up to go on break, e.g.)
+      // silently ends it seconds later. Confirmed via real diagnostics: break-in/break-out 11
+      // seconds apart, then a 30-min-idle auto-clockout while genuinely on break. See
+      // timeproof-clock/page.tsx's handleBreakInner for the matching web-side fix.
+      const BREAK_END_CONFIRM_WINDOW_MS = 60_000;
+      if (type === 'break-out' && state.breakStartedAt) {
+        const startedMs = new Date(state.breakStartedAt).getTime();
+        if (Date.now() - startedMs < BREAK_END_CONFIRM_WINDOW_MS) {
+          const secondsIn = Math.max(1, Math.round((Date.now() - startedMs) / 1000));
+          if (!confirm(`You started your break only ${secondsIn}s ago — end it already?`)) return;
+        }
+      }
       const btn = document.getElementById('breakBtn');
       btn.disabled = true;
-      const type = state.isOnBreak ? 'break-out' : 'break-in';
       const result = await window.trayAPI.timeclockAction(type);
       btn.disabled = false;
       if (!result.success) showMsg(result.error || 'Failed', true);

@@ -926,8 +926,22 @@ const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
 let lastCheckpointFailReportedAt = 0;
 const CHECKPOINT_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
 
-const commitActiveSegment = async (endAt: Date): Promise<boolean> => {
+const commitActiveSegment = async (endAtRaw: Date): Promise<boolean> => {
   if (activityStartMs === null) return true;
+  // A backdated endAt (e.g. onIdleChange's idle-onset estimate) can land before
+  // activityStartMs if activityStartMs was already advanced past that point by an intervening
+  // periodic checkpoint that didn't yet know idle time was building up. Clamping here — instead
+  // of letting durationMs go negative — protects every caller uniformly: it lands on the
+  // existing "nothing meaningful to commit" no-op path below rather than silently discarding
+  // whatever time was actually tracked. Reported so this edge case is visible if it still
+  // happens after the periodic checkpoint's own idle-awareness fix.
+  const endAt = endAtRaw.getTime() < activityStartMs ? new Date(activityStartMs) : endAtRaw;
+  if (endAt.getTime() !== endAtRaw.getTime()) {
+    reportDiagnostic('activity_segment_clamped', 'commitActiveSegment endAt clamped to activityStartMs', {
+      requestedEndAt: endAtRaw.toISOString(),
+      activityStartMs,
+    });
+  }
   const currentToken = store.get('crm_token') as string | undefined;
   const durationMs = endAt.getTime() - activityStartMs;
   if (!currentToken || durationMs < 30_000) return true;
@@ -1246,8 +1260,17 @@ const startAgentServices = async (token: string) => {
       activityStartMs === null
     )
       return;
-    const now = new Date();
-    const committed = await commitActiveSegment(now);
+    const nowMs = Date.now();
+    // Raw idle time may already be building up even though it isn't CONFIRMED yet
+    // (agentState.isIdle only flips true after the full 10-min debounce) — blindly committing
+    // "now" as the segment end would wrongly count that buildup as active time. The LATER
+    // confirmed-idle backdate (onIdleChange) then computes an endAt earlier than whatever
+    // activityStartMs this tick just advanced to, silently discarding that whole stretch (see
+    // commitActiveSegment's clamp). Mirror onIdleChange's own backdating here — same source,
+    // same 30s floor — so both mechanisms agree on what actually counts as active.
+    const rawIdleMs = powerMonitor.getSystemIdleTime() * 1000;
+    const commitEndAt = rawIdleMs > 30_000 ? new Date(nowMs - rawIdleMs) : new Date(nowMs);
+    const committed = await commitActiveSegment(commitEndAt);
     // Only roll the start point forward if the commit actually succeeded —
     // otherwise this chunk is silently dropped (activityStartMs would move to
     // "now" while todayTotalActiveMs never received the duration), and every
@@ -1255,7 +1278,9 @@ const startAgentServices = async (token: string) => {
     // activityStartMs untouched means the next tick retries the FULL
     // accumulated duration instead.
     if (committed) {
-      activityStartMs = now.getTime();
+      // Advance to the real "now", not commitEndAt — any raw idle time since commitEndAt is
+      // genuine dead time, correctly left uncovered rather than folded into the next segment.
+      activityStartMs = nowMs;
       agentState.activityStartMs = activityStartMs;
     }
   }, 'activity-checkpoint'), ACTIVITY_CHECKPOINT_MS);
