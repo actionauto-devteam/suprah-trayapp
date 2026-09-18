@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
 contextBridge.exposeInMainWorld('idleRecorderAPI', {
-  onStart: (cb: (data: { sourceId: string }) => void) =>
+  onStart: (cb: (data: { sourceId: string; bookendMs: number; windowEndMs: number }) => void) =>
     ipcRenderer.on('idle-recording:start', (_e, data) => cb(data)),
 
   onStop: (cb: () => void) =>

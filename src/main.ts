@@ -114,7 +114,7 @@ const envPath = app.isPackaged
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
-import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC, getLastIdleSeconds } from './idle';
+import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC, getLastIdleSeconds, isLastIdleSampleReliable } from './idle';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired } from './heartbeat';
 import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, waitForCaptureToFinish, toShiftDate } from './screenshot';
 import { flushQueue } from './offline-queue';
@@ -760,7 +760,7 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         ? (s.totalBreakSeconds ?? 0)
         : 0;
       agentState.todayTotalWorkedSeconds = s.todayTotalWorkedSeconds ?? 0;
-      wallClockBaseMs = (s.wallClockRenderedSeconds ?? 0) * 1000;
+      wallClockBaseMs = (s.currentSessionSeconds ?? 0) * 1000;
       wallClockBaseAt = s.isOnShift && !s.isOnBreak ? Date.now() : null;
       agentState.wallClockBaseMs = wallClockBaseMs;
       agentState.wallClockBaseAt = wallClockBaseAt;
@@ -916,6 +916,9 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
 let tokenRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
 let activityCheckpointIntervalId: ReturnType<typeof setInterval> | null = null;
 const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
+const IDLE_STRETCH_BACKDATE_CAP_MS = (IDLE_THRESHOLD_SEC + 60) * 1000;
+const IDLE_VIDEO_BOOKEND_MS = 2 * 60 * 1000;
+const IDLE_STAGE_WINDOW_MS = 600_000;
 
 /**
  * Commit current active segment (activityStartMs → endAt) into todayTotalActiveMs.
@@ -1013,11 +1016,44 @@ const startIdleVideoChunk = async (chunkIndex: 1 | 2 | 3): Promise<boolean> => {
   const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
   if (!wasTracking) return false;
 
-  const started = await startIdleRecording();
+  let resolvedStartMs: number | null = null;
+  if (chunkIndex === 1) {
+    const rawIdleSeconds = getLastIdleSeconds();
+    const sampleReliable = isLastIdleSampleReliable();
+    const candidateStartMs = Date.now() - rawIdleSeconds * 1000;
+    const ceilingMs = Date.now() - IDLE_STRETCH_BACKDATE_CAP_MS;
+    const lowerBoundMs = Math.max(activityStartMs ?? candidateStartMs, ceilingMs);
+    resolvedStartMs = Math.max(candidateStartMs, lowerBoundMs);
+    if (!sampleReliable) resolvedStartMs = Date.now();
+
+    reportDiagnostic('idle_stretch_start_computed', 'startIdleVideoChunk chunk-1 anchor computed', {
+      rawIdleSeconds,
+      sampleReliable,
+      candidateStartMs,
+      activityStartMs,
+      resolvedStartMs,
+      windowEndMs: resolvedStartMs + IDLE_STAGE_WINDOW_MS,
+    });
+    if (resolvedStartMs !== candidateStartMs) {
+      reportDiagnostic('idle_stretch_start_clamped', 'startIdleVideoChunk idleStretchStartMs clamped', {
+        rawIdleSeconds,
+        sampleReliable,
+        candidateStartMs,
+        activityStartMs,
+        resolvedStartMs,
+      });
+    }
+  }
+
+  const windowEndMs = chunkIndex === 1
+    ? resolvedStartMs! + IDLE_STAGE_WINDOW_MS
+    : Date.now() + IDLE_STAGE_WINDOW_MS;
+
+  const started = await startIdleRecording(windowEndMs, IDLE_VIDEO_BOOKEND_MS);
   if (!started) return false;
 
   if (chunkIndex === 1) {
-    idleStretchStartMs = Date.now() - getLastIdleSeconds() * 1000;
+    idleStretchStartMs = resolvedStartMs!;
   }
   currentIdleChunkIndex = chunkIndex;
   agentState.idleRecordingActive = true;

@@ -57,7 +57,7 @@ function createRecorderWindow(): BrowserWindow {
 const START_RETRY_ATTEMPTS = 3;
 const START_RETRY_DELAY_MS = 3_000;
 
-async function attemptStartIdleRecording(): Promise<boolean> {
+async function attemptStartIdleRecording(windowEndMs: number, bookendMs: number): Promise<boolean> {
   if (!recorderWindow || recorderWindow.isDestroyed()) {
     recorderWindow = createRecorderWindow();
   }
@@ -75,15 +75,15 @@ async function attemptStartIdleRecording(): Promise<boolean> {
   const sourceId = sources[0]?.id ?? '';
   if (!sourceId) return false;
 
-  recorderWindow?.webContents.send('idle-recording:start', { sourceId });
+  recorderWindow?.webContents.send('idle-recording:start', { sourceId, bookendMs, windowEndMs });
   return true;
 }
 
-export async function startIdleRecording(): Promise<boolean> {
+export async function startIdleRecording(windowEndMs: number, bookendMs: number): Promise<boolean> {
   if (status !== 'idle') return false;
 
   for (let attempt = 1; attempt <= START_RETRY_ATTEMPTS; attempt++) {
-    const started = await attemptStartIdleRecording();
+    const started = await attemptStartIdleRecording(windowEndMs, bookendMs);
     if (started) {
       setStatus('recording');
       return true;

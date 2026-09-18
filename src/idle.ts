@@ -28,9 +28,14 @@ let recordingTriggerStreak = 0;
 let stage2Streak = 0;
 let stage3Streak = 0;
 let lastIdleStage: 0 | 1 | 2 | 3 = 0;
+let lastTickReliable = true;
 
 export function getLastIdleSeconds(): number {
   return lastIdleSeconds;
+}
+
+export function isLastIdleSampleReliable(): boolean {
+  return lastTickReliable;
 }
 
 const IDLE_HISTORY_LENGTH = 6;
@@ -65,6 +70,7 @@ export function startIdleMonitor(
 
     const idleSeconds = idleDetectionExempt ? 0 : powerMonitor.getSystemIdleTime();
     lastIdleSeconds = idleSeconds;
+    lastTickReliable = true;
     idleSecondsHistory = [...idleSecondsHistory, idleSeconds].slice(-IDLE_HISTORY_LENGTH);
 
     tickCount += 1;
@@ -78,15 +84,22 @@ export function startIdleMonitor(
       stage2Streak = 0;
       stage3Streak = 0;
       previousIdleSecondsSample = idleSeconds;
-      if (lastIdleState) {
+      lastTickReliable = false;
+
+      const stillIdle = idleSeconds >= IDLE_THRESHOLD_SEC;
+      const stillAboveRecordingThreshold = idleSeconds >= RECORDING_TRIGGER_THRESHOLD_SEC;
+      const supportedStage: 0 | 1 | 2 | 3 =
+        !stillIdle ? 0 : idleSeconds >= IDLE_STAGE3_THRESHOLD_SEC ? 3 : idleSeconds >= IDLE_STAGE2_THRESHOLD_SEC ? 2 : 1;
+
+      if (lastIdleState && !stillIdle) {
         lastIdleState = false;
         onIdleChange(false);
       }
-      if (recordingTriggerState) {
+      if (recordingTriggerState && !stillAboveRecordingThreshold) {
         recordingTriggerState = false;
         onRecordingThreshold?.(false);
       }
-      lastIdleStage = 0;
+      lastIdleStage = Math.min(lastIdleStage, supportedStage) as 0 | 1 | 2 | 3;
       return;
     }
 
@@ -98,6 +111,7 @@ export function startIdleMonitor(
       recordingTriggerStreak = 0;
       stage2Streak = 0;
       stage3Streak = 0;
+      lastTickReliable = false;
       return;
     }
 
@@ -175,6 +189,7 @@ export function stopIdleMonitor(): void {
   stage2Streak = 0;
   stage3Streak = 0;
   lastIdleStage = 0;
+  lastTickReliable = true;
 }
 
 export function getIsIdle(): boolean {

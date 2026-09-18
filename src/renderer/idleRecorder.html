@@ -5,6 +5,7 @@
   <title>Idle Recorder</title>
 </head>
 <body>
+<script src="fix-webm-duration.js"></script>
 <script>
 (function () {
   'use strict';
@@ -14,22 +15,33 @@
   let mediaRecorder = null;
   let videoChunks = [];
   let displayStream = null;
+  let recordingStartedAt = null;
+  let activeMs = 0;
+  let segmentStartedAt = null;
+  let pauseTimer = null;
+  let resumeTimer = null;
 
   function stopAllStreams() {
     displayStream?.getTracks().forEach(t => t.stop());
     displayStream = null;
   }
 
-  api.onStart(async ({ sourceId }) => {
+  function clearBookendTimers() {
+    if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = null; }
+    if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+  }
+
+  api.onStart(async ({ sourceId, bookendMs, windowEndMs }) => {
+    clearBookendTimers();
     try {
       const displayConstraints = {
         video: {
           mandatory: {
             chromeMediaSource: 'desktop',
             chromeMediaSourceId: sourceId,
-            maxWidth: 640,
-            maxHeight: 400,
-            maxFrameRate: 2,
+            maxWidth: 1920,
+            maxHeight: 1080,
+            maxFrameRate: 30,
           },
         },
       };
@@ -37,30 +49,61 @@
       displayStream = await navigator.mediaDevices.getUserMedia(displayConstraints);
 
       videoChunks = [];
+      recordingStartedAt = Date.now();
+      activeMs = 0;
+      segmentStartedAt = recordingStartedAt;
       const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
         ? 'video/webm;codecs=vp8'
         : 'video/webm';
 
-      mediaRecorder = new MediaRecorder(displayStream, { mimeType, videoBitsPerSecond: 200_000 });
+      mediaRecorder = new MediaRecorder(displayStream, { mimeType, videoBitsPerSecond: 4_000_000 });
       mediaRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) videoChunks.push(e.data);
       };
+      mediaRecorder.onpause = () => {
+        if (segmentStartedAt !== null) activeMs += Date.now() - segmentStartedAt;
+        segmentStartedAt = null;
+      };
+      mediaRecorder.onresume = () => {
+        segmentStartedAt = Date.now();
+      };
       mediaRecorder.start(5000);
+
+      const validBookend = Number.isFinite(bookendMs) && Number.isFinite(windowEndMs);
+      if (validBookend) {
+        const resumeDelayMs = Math.max(bookendMs, (windowEndMs - bookendMs) - Date.now());
+        pauseTimer = setTimeout(() => {
+          pauseTimer = null;
+          if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.pause();
+        }, bookendMs);
+        resumeTimer = setTimeout(() => {
+          resumeTimer = null;
+          if (mediaRecorder && mediaRecorder.state === 'paused') mediaRecorder.resume();
+        }, resumeDelayMs);
+      }
     } catch (err) {
       api.sendError(err instanceof Error ? err.message : String(err));
     }
   });
 
   api.onStop(() => {
+    clearBookendTimers();
     if (!mediaRecorder || mediaRecorder.state === 'inactive') {
       stopAllStreams();
       api.sendReady([]);
       return;
     }
 
+    const finalActiveMs = activeMs + (segmentStartedAt !== null ? Date.now() - segmentStartedAt : 0);
+
     mediaRecorder.onstop = () => {
-      const blob = new Blob(videoChunks, { type: 'video/webm' });
-      blob.arrayBuffer().then((ab) => {
+      const rawBlob = new Blob(videoChunks, { type: 'video/webm' });
+      const fixDuration = window.ysFixWebmDuration;
+      const fixed = fixDuration && finalActiveMs > 0
+        ? fixDuration(rawBlob, finalActiveMs).catch(() => rawBlob)
+        : Promise.resolve(rawBlob);
+
+      fixed.then((blob) => blob.arrayBuffer()).then((ab) => {
         api.sendReady(Array.from(new Uint8Array(ab)));
         stopAllStreams();
       }).catch(() => {
