@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('trayAPI', {
   resumeShift: () => ipcRenderer.invoke('shift:resume'),
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   openScreenRecordingSettings: () => ipcRenderer.invoke('app:open-screen-recording-settings'),
+  downloadUpdate: () => ipcRenderer.invoke('app:download-update'),
+  quitApp: () => ipcRenderer.invoke('app:quit'),
+  signInDevice: () => ipcRenderer.invoke('device:sign-in'),
 
   // Events from main → renderer
   onStatusUpdate: (cb: (data: unknown) => void) =>
@@ -22,13 +25,4 @@ contextBridge.exposeInMainWorld('trayAPI', {
 
   // Remove listeners on cleanup
   removeAllListeners: (channel: string) => ipcRenderer.removeAllListeners(channel),
-
-  // Recording
-  startRecording: () => ipcRenderer.invoke('recording:start-request'),
-  stopRecording: () => ipcRenderer.invoke('recording:stop-request'),
-  onRecordingState: (cb: (state: string) => void) =>
-    ipcRenderer.on('recording:state', (_e, state: string) => cb(state)),
-
-  // Autrix AI panel
-  openAutrix: () => ipcRenderer.invoke('autrix:open'),
 });

@@ -1,133 +1,43 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, screen, Notification, powerMonitor, dialog, safeStorage } from 'electron';
 
 app.setName('Suprah AI - Timeproof Clock');
 app.setPath('userData', app.getPath('userData'));
 app.disableHardwareAcceleration();
 import path from 'path';
+import os from 'os';
 import http from 'http';
 import axios from 'axios';
 import dotenv from 'dotenv';
-import { autoUpdater } from 'electron-updater';
 
-autoUpdater.autoDownload = true;
-autoUpdater.autoInstallOnAppQuit = true;
-autoUpdater.logger = null;
-
-
-const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000; // backstop: re-check every 30 minutes
-// Caps how long a downloaded update can wait for the current shift to end before installing
-// anyway — mirrors the NO_DATA_GRACE_HOURS safety-cap philosophy in
-// staleShiftAutoClockout.scheduler.ts: an unusually long single shift shouldn't be able to
-// indefinitely block a pending update.
-const PENDING_UPDATE_INSTALL_CAP_MS = 16 * 60 * 60 * 1000;
-
-// Guards the three independent update-check trigger sites (15s-after-boot, 30-min periodic
-// backstop, every socket reconnect) against firing checkForUpdates() concurrently — previously a
-// reconnect landing close to the periodic backstop could produce two checks ~60s apart with
-// contradictory results (one reporting a version available, the next reporting "already on
-// latest" for the same check).
-let updateCheckState: 'idle' | 'checking' | 'available' = 'idle';
-const requestUpdateCheck = (): void => {
-  if (!app.isPackaged || updateCheckState !== 'idle') return;
-  updateCheckState = 'checking';
-  autoUpdater.checkForUpdates().catch(() => { updateCheckState = 'idle'; });
-};
-
-// Deferred-install state — see the 'update-downloaded' handler below and checkDeferredInstall().
-let pendingUpdateInstall = false;
-let pendingUpdateInstallSetAt = 0;
-let updateInstallInProgress = false;
-
-const runQuitAndInstall = async (): Promise<void> => {
-  if (updateInstallInProgress) return;
-  updateInstallInProgress = true;
-  const deferredForMs = pendingUpdateInstall ? Date.now() - pendingUpdateInstallSetAt : 0;
-  reportDiagnostic('autoupdate_installing', 'Installing downloaded update', {
-    wasDeferred: pendingUpdateInstall,
-    deferredForMs,
-    wasOnShift: agentState.isOnShift,
-  });
-  try {
-    store.set('pendingUpdateRelaunchAt', Date.now());
-  } catch {
-  }
-  if (activityStartMs !== null) {
-    await commitActiveSegment(new Date());
-  }
-  await waitForCaptureToFinish();
-  autoUpdater.quitAndInstall(true, true);
-};
-
-// Called from broadcastState() (already fired after every clock action, idle transition, and
-// break event) — the natural point to notice a deferred install's shift has since ended, without
-// needing to separately hook every individual time-out code path (manual clock-out, socket-
-// pushed auto-close, the tray's own 35-min local fallback, the staged-escalation auto-end).
-const checkDeferredInstall = (): void => {
-  if (!pendingUpdateInstall || updateInstallInProgress) return;
-  const pastSafetyCap = Date.now() - pendingUpdateInstallSetAt > PENDING_UPDATE_INSTALL_CAP_MS;
-  if (!agentState.isOnShift || pastSafetyCap) {
-    runQuitAndInstall().catch(() => {});
-  }
-};
-
-// Platform-wide fatal error before per-org processing, notify all admins.
-autoUpdater.on('error', (err) => {
-  updateCheckState = 'idle';
-  reportDiagnostic('autoupdate_error', 'Auto-updater error', { error: err?.message || String(err), platform: process.platform });
-});
-autoUpdater.on('update-not-available', () => {
-  updateCheckState = 'idle';
-  reportDiagnostic('autoupdate_check_ok', 'Auto-updater checked — already on latest version', { platform: process.platform, version: app.getVersion() });
-});
-autoUpdater.on('update-available', (info) => {
-  updateCheckState = 'available';
-  reportDiagnostic('autoupdate_available', 'Auto-updater found a new version', { platform: process.platform, currentVersion: app.getVersion(), newVersion: info?.version });
-});
-
-autoUpdater.on('update-downloaded', () => {
-  // Still on shift — defer the disruptive quit+install until the shift ends (checkDeferredInstall,
-  // called from broadcastState) instead of interrupting active tracking mid-work. Off-shift means
-  // nothing is being tracked right now anyway, so install proceeds on the original short delay.
-  if (agentState.isOnShift) {
-    pendingUpdateInstall = true;
-    pendingUpdateInstallSetAt = Date.now();
-    if (Notification.isSupported()) {
-      new Notification({
-        title: "Update ready",
-        body: "A new version of Suprah AI - Timeproof Clock was downloaded and will install automatically once you end your shift.",
-        silent: true,
-      }).show();
-    }
-    return;
-  }
-  if (Notification.isSupported()) {
-    new Notification({
-      title: "Update ready",
-      body: "A new version of Suprah AI - Timeproof Clock was downloaded and will install automatically in a few seconds.",
-      silent: true,
-    }).show();
-  }
-  setTimeout(() => { runQuitAndInstall().catch(() => {}); }, 10_000);
-});
 const envPath = app.isPackaged
   ? path.join(process.resourcesPath, '.env')
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
 import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC, getLastIdleSeconds, isLastIdleSampleReliable } from './idle';
-import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, waitForCaptureToFinish, toShiftDate } from './screenshot';
+import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired, setOnAuthRejected } from './heartbeat';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, toShiftDate } from './screenshot';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
-import { startCallStatePolling, stopCallStatePolling, getCurrentCall, ActiveCallState } from './call-state';
-import { startRecording, stopRecording, getRecordingStatus, registerRecordingIpcHandlers, destroyRecorderWindow } from './recording';
 import { startIdleRecording, stopAndUploadIdleRecording, destroyIdleRecorderWindow, registerIdleRecordingIpcHandlers, getIdleRecordingStatus } from './idleRecording';
 import { flushIdleRecordingQueue } from './idleRecordingQueue';
-import { initTranscription, resetTranscript, getFullTranscript, processAudioChunk } from './transcription';
-import { io as ioClient, Socket as TraySocket } from 'socket.io-client';
+import { SESSION_CHECK_INTERVAL_MS, TOKEN_REFRESH_WINDOW_MS, isAuthRejection, isStaleSameUserToken, probeToken, readTokenClaims, refreshToken, shouldRefreshNow } from './session';
+import { isNewerVersion } from './version';
+import { buildAllowedOrigins, matchOrigin } from './originPolicy';
+import { createAuthCoordinator } from './authCoordinator';
+import type { ConfirmPrompt, ConnectionState, InfoPrompt } from './authCoordinator';
+import {
+  clearDeviceCredential,
+  deviceCredentialExists,
+  isAutoSignInPaused,
+  loadDeviceCredential,
+  saveDeviceCredential,
+  setAutoSignInPaused,
+} from './deviceStorage';
+import { fetchLatestVersion, getInstallerUrl } from './updateCheck';
+import { startDesktopLocation, stopDesktopLocation, pauseDesktopLocation, resumeDesktopLocation } from './desktopLocation';
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const AutoLaunch = require('auto-launch') as new (opts: { name: string; isHidden: boolean }) => { enable: () => void };
+const AutoLaunch = require('auto-launch') as new (opts: { name: string; isHidden: boolean }) => { disable: () => Promise<unknown> };
 
 type StoreInstance = {
   get: (key: string) => unknown;
@@ -135,7 +45,7 @@ type StoreInstance = {
   delete: (key: string) => void;
 };
 const Store = require('electron-store').default;
-const store = new Store({ encryptionKey: 'aa-tray-secure-key' }) as StoreInstance;
+const store = new Store({ encryptionKey: 'aa-tray-secure-key', clearInvalidConfig: true }) as StoreInstance;
 
 /* ─────────────────────────────────────────────────────────────────
    Auth-mode helpers — 'crm' uses /api/crm/* endpoints,
@@ -210,6 +120,8 @@ interface User {
   mainMonitorOnly?: boolean;
   idleDetectionExempt?: boolean;
   idleVideoProofEnabled?: boolean;
+  desktopLocationEnabled?: boolean;
+  trayDeviceAuthEnabled?: boolean;
 }
 
 interface AgentState {
@@ -234,12 +146,13 @@ interface AgentState {
   // macOS-only flag; null elsewhere or before first check, not guaranteed stable once granted (unsigned build).
   screenRecordingGranted: boolean | null;
   idleRecordingActive: boolean;
+  sessionExpired: boolean;
+  updateAvailable: { version: string } | null;
+  connection: { state: ConnectionState; message: string } | null;
 }
 
 let tray: Tray | null = null;
 let statusWindow: BrowserWindow | null = null;
-let autrixWindow: BrowserWindow | null = null;
-let traySocket: TraySocket | null = null;
 
 let breakNotifyIntervalId: ReturnType<typeof setInterval> | null = null;
 let screenRecordingCheckIntervalId: ReturnType<typeof setInterval> | null = null;
@@ -286,7 +199,7 @@ let currentIdleChunkIndex: 1 | 2 | 3 | null = null;
 let wallClockBaseMs: number = 0;
 let wallClockBaseAt: number | null = null;
 
-let agentState: AgentState = {
+const createAgentState = (): AgentState => ({
   isAuthenticated: false,
   user: null,
   isOnShift: false,
@@ -305,44 +218,42 @@ let agentState: AgentState = {
   wallClockBaseAt: null,
   screenRecordingGranted: null,
   idleRecordingActive: false,
-};
+  sessionExpired: false,
+  updateAvailable: null,
+  connection: null,
+});
+
+let agentState: AgentState = createAgentState();
 
 /* ─────────────────────────────────────────────────────────────────
    State broadcast helpers
 ───────────────────────────────────────────────────────────────── */
-// Increased window height to prevent clipping of bottom content (version label/button row) 
-// on high DPI/font scaling; extra space is transparent when shorter views render.
 const STATUS_HEIGHT_BASE = 460;
-const STATUS_HEIGHT_CALL = 528;
-// Extra height reserved for Screen Recording warning banner; 
-// only added when shown, so no impact for users who never see it.
 const SCREEN_RECORDING_BANNER_HEIGHT = 60;
+const UPDATE_BANNER_HEIGHT = 100;
 
 let lastTraySignature = '';
 
+const getStatusWindowTargetHeight = (): number =>
+  STATUS_HEIGHT_BASE
+  + (agentState.screenRecordingGranted === false ? SCREEN_RECORDING_BANNER_HEIGHT : 0)
+  + (agentState.updateAvailable ? UPDATE_BANNER_HEIGHT : 0);
+
+const fitStatusWindow = (): void => {
+  if (!statusWindow || statusWindow.isDestroyed()) return;
+  const targetH = getStatusWindowTargetHeight();
+  const [currentW, currentH] = statusWindow.getSize();
+  if (currentH === targetH) return;
+  const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
+  statusWindow.setSize(currentW, targetH);
+  statusWindow.setPosition(screenW - currentW - 16, screenH - targetH - 16);
+};
+
 const broadcastState = () => {
-  checkDeferredInstall();
   if (statusWindow && !statusWindow.isDestroyed()) {
-    const callState = getCurrentCall();
-    const targetH = (callState ? STATUS_HEIGHT_CALL : STATUS_HEIGHT_BASE)
-      + (agentState.screenRecordingGranted === false ? SCREEN_RECORDING_BANNER_HEIGHT : 0);
-    const [currentW, currentH] = statusWindow.getSize();
-    if (currentH !== targetH) {
-      const { width: screenW, height: screenH } = screen.getPrimaryDisplay().workAreaSize;
-      statusWindow.setSize(currentW, targetH);
-      statusWindow.setPosition(screenW - currentW - 16, screenH - targetH - 16);
-    }
-    statusWindow.webContents.send('status:update', {
-      ...agentState,
-      activeCall: callState ? {
-        meetingId: callState.meetingId,
-        title: callState.title,
-        canRecord: callState.canRecord,
-        isRecording: getRecordingStatus() === 'recording',
-      } : null,
-    });
+    fitStatusWindow();
+    statusWindow.webContents.send('status:update', agentState);
   }
-  const call = getCurrentCall();
   const traySignature = [
     agentState.isAuthenticated,
     agentState.isAgentOnline,
@@ -351,10 +262,9 @@ const broadcastState = () => {
     activityStartMs !== null,
     agentState.isIdle,
     agentState.isOnBreak,
-    call?.meetingId ?? '',
-    call?.title ?? '',
-    call?.canRecord ?? false,
-    getRecordingStatus(),
+    agentState.sessionExpired,
+    agentState.updateAvailable?.version ?? '',
+    agentState.connection?.state ?? '',
   ].join('|');
   if (traySignature !== lastTraySignature) {
     lastTraySignature = traySignature;
@@ -424,7 +334,9 @@ const updateTrayIcon = () => {
       : agentState.isOnBreak
       ? `Suprah AI - Timeproof Clock — On Break (${agentState.user?.fullName})`
       : `Suprah AI - Timeproof Clock — ${agentState.user?.fullName}`
-    : 'Suprah AI - Timeproof Clock — Not signed in';
+    : agentState.sessionExpired
+      ? "Suprah AI - Timeproof Clock — Can't connect"
+      : 'Suprah AI - Timeproof Clock — Not signed in';
 
   tray.setToolTip(tooltip);
 };
@@ -443,40 +355,21 @@ const buildTrayMenu = () => {
     });
     items.push({ type: 'separator' });
     items.push({ label: 'Open CRM', click: () => shell.openExternal(CRM_URL) });
-
-    // ── Call / recording items (only when in an active call) ───────────────
-    const activeCall = getCurrentCall();
-    if (activeCall) {
-      items.push({ type: 'separator' });
-      items.push({ label: `In Call: ${activeCall.title || 'Meeting'}`, enabled: false });
-
-      if (activeCall.canRecord) {
-        const recStatus = getRecordingStatus();
-        if (recStatus === 'idle') {
-          items.push({
-            label: '⏺ Start Recording',
-            click: () => handleStartRecording(activeCall),
-          });
-        } else if (recStatus === 'recording') {
-          items.push({
-            label: '⏹ Stop & Save Recording',
-            click: handleStopRecording,
-          });
-        } else {
-          items.push({ label: '⏳ Saving recording…', enabled: false });
-        }
-      }
-
-      items.push({
-        label: '✦ Open Autrix AI',
-        click: showAutrixWindow,
-      });
-    }
-
     items.push({ type: 'separator' });
     items.push({ label: 'Sign Out', click: handleLogout });
+    if (authCoordinator.hasCredential()) items.push({ label: 'Disconnect this computer', click: confirmDisconnect });
   } else {
+    if (agentState.sessionExpired) items.push({ label: "Can't connect — close and reopen the tray app", enabled: false });
+    if (agentState.connection?.state === 'signed_out') {
+      items.push({ label: 'Sign in', click: () => { authCoordinator.signInWithDevice({ userInitiated: true }).catch(() => {}); } });
+    }
     items.push({ label: 'Open Dashboard to Sign In', click: () => shell.openExternal(CRM_URL) });
+    if (authCoordinator.hasCredential()) items.push({ label: 'Disconnect this computer', click: confirmDisconnect });
+  }
+
+  if (agentState.updateAvailable) {
+    items.push({ type: 'separator' });
+    items.push({ label: `Download latest version (v${agentState.updateAvailable.version})`, click: openUpdateDownload });
   }
 
   items.push({ type: 'separator' });
@@ -499,7 +392,8 @@ const positionStatusWindow = () => {
   if (!statusWindow) return;
   const display = screen.getPrimaryDisplay();
   const { width, height } = display.workAreaSize;
-  statusWindow.setPosition(Math.round(width - 316), Math.round(height - STATUS_HEIGHT_BASE - 16));
+  const [, windowHeight] = statusWindow.getSize();
+  statusWindow.setPosition(Math.round(width - 316), Math.round(height - windowHeight - 16));
 };
 
 // Tracks the in-flight loadFile() call so showStatusWindow can wait for it — see its comment.
@@ -547,124 +441,6 @@ const createStatusWindow = () => {
   });
 };
 
-/* ─────────────────────────────────────────────────────────────────
-   Autrix AI window
-───────────────────────────────────────────────────────────────── */
-const createAutrixWindow = () => {
-  const display = screen.getPrimaryDisplay();
-  const { width } = display.workAreaSize;
-
-  autrixWindow = new BrowserWindow({
-    width: 320,
-    height: 520,
-    x: width - 336,
-    y: 60,
-    resizable: true,
-    minWidth: 280,
-    minHeight: 400,
-    frame: false,
-    transparent: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    show: false,
-    title: 'Autrix AI',
-    webPreferences: {
-      preload: path.join(__dirname, 'autrix-preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-
-  autrixWindow.loadFile(path.join(__dirname, '..', 'src', 'renderer', 'autrix.html'));
-  autrixWindow.on('closed', () => { autrixWindow = null; });
-};
-
-const showAutrixWindow = () => {
-  if (!autrixWindow || autrixWindow.isDestroyed()) createAutrixWindow();
-  autrixWindow?.show();
-  autrixWindow?.focus();
-};
-
-/* ─────────────────────────────────────────────────────────────────
-   Tray socket — real-time commands from backend (recording triggers)
-───────────────────────────────────────────────────────────────── */
-const connectTraySocket = (token: string) => {
-  if (traySocket?.connected) return;
-  if (traySocket) { traySocket.removeAllListeners(); traySocket.disconnect(); }
-
-  traySocket = ioClient(API_URL, {
-    path: '/socket/supraspace',
-    auth: { token },
-    reconnection: true,
-    reconnectionAttempts: 10,
-    reconnectionDelay: 3000,
-    reconnectionDelayMax: 15_000,
-    transports: ['websocket', 'polling'],
-  });
-
-  traySocket.on('connect', () => {
-    console.log('[Tray Socket] Connected:', traySocket?.id);
-  });
-
-  traySocket.on('tray:start-recording', () => {
-    const call = getCurrentCall();
-    if (call && call.canRecord) handleStartRecording(call);
-  });
-
-  traySocket.on('tray:stop-recording', () => {
-    handleStopRecording();
-  });
-
-  traySocket.on('disconnect', (reason) => {
-    console.log('[Tray Socket] Disconnected:', reason);
-  });
-
-  traySocket.on('connect_error', (err) => {
-    console.warn('[Tray Socket] Connection error:', err.message);
-  });
-};
-
-const disconnectTraySocket = () => {
-  if (traySocket) {
-    traySocket.removeAllListeners();
-    traySocket.disconnect();
-    traySocket = null;
-  }
-};
-
-/* ─────────────────────────────────────────────────────────────────
-   Recording handlers
-───────────────────────────────────────────────────────────────── */
-const handleStartRecording = (call: ActiveCallState) => {
-  const token = store.get('crm_token') as string | undefined;
-  if (!token) return;
-
-  resetTranscript();
-  initTranscription(API_URL, token, (text) => {
-    // Push transcript updates to the Autrix window if it's open
-    if (autrixWindow && !autrixWindow.isDestroyed()) {
-      autrixWindow.webContents.send('autrix:transcript-update', text);
-    }
-  });
-
-  startRecording(call.meetingId, {
-    onStatusChange: () => { tray?.setContextMenu(buildTrayMenu()); broadcastState(); },
-    onChunkReady: (audioBuffer, chunkIndex) => {
-      processAudioChunk(audioBuffer, chunkIndex).catch(() => {});
-    },
-  }).catch(() => {});
-};
-
-const handleStopRecording = () => {
-  stopRecording().then(() => {
-    tray?.setContextMenu(buildTrayMenu());
-    broadcastState();
-    if (autrixWindow && !autrixWindow.isDestroyed()) {
-      autrixWindow.webContents.send('autrix:call-ended');
-    }
-  }).catch(() => {});
-};
-
 const showStatusWindow = async () => {
   const isFreshWindow = !statusWindow || statusWindow.isDestroyed();
   if (isFreshWindow) createStatusWindow();
@@ -682,6 +458,7 @@ const showStatusWindow = async () => {
     // initial placement can be wrong if it ran before the OS finished enumerating displays at
     // login. Without this, the window can end up permanently off-screen with no way to recover
     // short of a reinstall — the exact "tray icon shows, click does nothing" symptom.
+    fitStatusWindow();
     positionStatusWindow();
     // Force an immediate recheck instead of waiting on the 5min interval — this is exactly the
     // moment a user comes back after granting Screen Recording via "Fix Now", so the banner
@@ -702,26 +479,297 @@ const showStatusWindow = async () => {
 /* ─────────────────────────────────────────────────────────────────
    Agent services — start/stop on login/logout
 ───────────────────────────────────────────────────────────────── */
-/**
- * Tries to renew the stored CRM JWT before it expires.
- * Returns the new token on success, null on failure (token expired or network error).
- */
-const tryRefreshToken = async (token: string): Promise<string | null> => {
-  try {
-    const { data } = await axios.post(
-      `${API_URL}/api/crm/token-refresh`,
-      {},
-      { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 }
-    );
-    const newToken: string = data?.data?.token;
-    if (newToken) {
-      store.set('crm_token', newToken);
-      return newToken;
+const CANNOT_CONNECT_MESSAGE = "Can't connect to your tray app. Please close the tray app, open it again, then try again on the website.";
+const EXPIRED_NOTICE_DELAY_MS = 90_000;
+const IDLE_RECORDING_SETTLE_CAP_MS = 35_000;
+
+let sessionCheckInFlight = false;
+let sessionEnding = false;
+
+const getStoredToken = (): string | undefined => {
+  const value = store.get('crm_token');
+  return typeof value === 'string' && value ? value : undefined;
+};
+
+const describeApiError = (err: unknown, fallback: string): string => {
+  if (isAuthRejection(err)) return CANNOT_CONNECT_MESSAGE;
+  const message = (err as { response?: { data?: { message?: unknown } } } | null)?.response?.data?.message;
+  return typeof message === 'string' && message ? message : fallback;
+};
+
+const applyRefreshedToken = (token: string): void => {
+  store.set('crm_token', token);
+  updateHeartbeatToken(token);
+  updateScreenshotToken(token);
+  updateSocketToken(token);
+};
+
+const isRefreshable = (token: string): boolean =>
+  getAuthMode() === 'crm' && readTokenClaims(token)?.type === 'crm';
+
+const setConnectionState = (state: ConnectionState | null, message?: string): void => {
+  agentState.connection = state ? { state, message: message ?? '' } : null;
+  broadcastState();
+};
+
+const deviceCipher = {
+  isAvailable: (): boolean => {
+    try {
+      return safeStorage.isEncryptionAvailable();
+    } catch {
+      return false;
     }
-    return null;
-  } catch {
-    return null;
+  },
+  encrypt: (plain: string): string => safeStorage.encryptString(plain).toString('base64'),
+  decrypt: (encoded: string): string => safeStorage.decryptString(Buffer.from(encoded, 'base64')),
+};
+
+const askConnectionQuestion = async (prompt: ConfirmPrompt): Promise<boolean> => {
+  const isRegister = prompt.type === 'register';
+  const result = await dialog.showMessageBox({
+    type: 'question',
+    buttons: isRegister ? ['Connect & Continue', 'Cancel'] : ['Switch account', `Keep ${prompt.registeredName}`],
+    defaultId: 0,
+    cancelId: 1,
+    title: isRegister ? 'Connect this computer' : 'Different account detected',
+    message: isRegister ? `Connect this computer to ${prompt.accountName}?` : 'Different account detected',
+    detail: isRegister
+      ? `The Suprah tray app on this computer will sign in as ${prompt.accountName}.`
+      : `This computer is set up for ${prompt.registeredName}. Switch to ${prompt.websiteName}?`,
+  });
+  return result.response === 0;
+};
+
+const showConnectionInfo = async (prompt: InfoPrompt): Promise<void> => {
+  await dialog.showMessageBox({
+    type: 'info',
+    buttons: ['OK'],
+    title: 'Shift in progress',
+    message: prompt.registeredName
+      ? `${prompt.registeredName} has a shift in progress on this computer.`
+      : 'A shift is in progress on this computer.',
+    detail: 'End that shift before switching accounts.',
+  });
+};
+
+const authCoordinator = createAuthCoordinator({
+  apiUrl: API_URL,
+  meta: () => ({ label: os.hostname(), platform: process.platform, appVersion: app.getVersion() }),
+  storage: {
+    load: () => loadDeviceCredential(store, deviceCipher),
+    save: (credential) => saveDeviceCredential(store, deviceCipher, credential),
+    clear: () => clearDeviceCredential(store),
+    exists: () => deviceCredentialExists(store),
+    isPaused: () => isAutoSignInPaused(store),
+    setPaused: (paused) => setAutoSignInPaused(store, paused),
+  },
+  getStoredToken,
+  isAuthenticated: () => agentState.isAuthenticated,
+  isOnShift: () => agentState.isOnShift,
+  handleTrayAuth: (token) => handleTrayAuth(token),
+  applyRefreshedToken,
+  resetSession: () => resetSessionState(false),
+  readUserId: (token) => (token ? readTokenClaims(token)?.userId ?? null : null),
+  confirm: askConnectionQuestion,
+  inform: (prompt) => {
+    showConnectionInfo(prompt).catch(() => {});
+  },
+  setConnection: setConnectionState,
+});
+
+const confirmDisconnect = async (): Promise<void> => {
+  if (agentState.isOnShift) {
+    await dialog.showMessageBox({
+      type: 'info',
+      buttons: ['OK'],
+      title: 'Shift in progress',
+      message: 'End your shift before disconnecting this computer.',
+    });
+    return;
   }
+  const result = await dialog.showMessageBox({
+    type: 'warning',
+    buttons: ['Disconnect', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Disconnect this computer',
+    message: 'Disconnect this computer from your Suprah account?',
+    detail: 'This tray app will sign out and stop tracking. Press Start Shift on the website to connect it again.',
+  });
+  if (result.response !== 0) return;
+  if ((await authCoordinator.disconnectThisComputer()) === 'none') return;
+  resetSessionState(false);
+  showStatusWindow();
+};
+
+const waitForIdleRecordingToSettle = async (capMs: number): Promise<void> => {
+  const deadline = Date.now() + capMs;
+  while (getIdleRecordingStatus() !== 'idle' && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+  }
+};
+
+const scheduleExpiredNotice = (): void => {
+  setTimeout(() => {
+    if (!agentState.sessionExpired || agentState.isAuthenticated) return;
+    if (!Notification.isSupported()) return;
+    new Notification({
+      title: "Can't connect",
+      body: 'Your tray app lost its connection. Close it, open it again, then go back to the website.',
+      silent: false,
+    }).show();
+  }, EXPIRED_NOTICE_DELAY_MS);
+};
+
+const resetSessionState = (expired: boolean): void => {
+  stopAgentServices();
+  activityStartMs = null;
+  todayTotalActiveMs = 0;
+  wallClockBaseMs = 0;
+  wallClockBaseAt = null;
+  store.delete('crm_token');
+  store.delete('auth_mode');
+  store.delete('user');
+  agentState = {
+    ...createAgentState(),
+    sessionExpired: expired,
+    screenRecordingGranted: agentState.screenRecordingGranted,
+    updateAvailable: agentState.updateAvailable,
+    screenshotsToday: agentState.screenshotsToday,
+    connection: agentState.connection,
+  };
+  updateTrayIcon();
+  tray?.setContextMenu(buildTrayMenu());
+  broadcastState();
+};
+
+const enterSessionExpired = async (rejectedToken: string): Promise<void> => {
+  if (sessionEnding || !agentState.isAuthenticated) return;
+  sessionEnding = true;
+  try {
+    const wasOnShift = agentState.isOnShift || activityStartMs !== null;
+    stopIdleVideoIfRecording('partial');
+    await waitForIdleRecordingToSettle(IDLE_RECORDING_SETTLE_CAP_MS);
+    if (getStoredToken() !== rejectedToken || !agentState.isAuthenticated) return;
+    resetSessionState(wasOnShift);
+    if (wasOnShift) scheduleExpiredNotice();
+  } finally {
+    sessionEnding = false;
+  }
+};
+
+const recoverOrExpire = async (rejectedToken: string): Promise<void> => {
+  const renewal = await authCoordinator.renewWithDevice(rejectedToken);
+  if (renewal !== 'unusable' || getStoredToken() !== rejectedToken) return;
+  await enterSessionExpired(rejectedToken);
+};
+
+const checkSessionToken = async (): Promise<void> => {
+  const current = getStoredToken();
+  if (sessionCheckInFlight || !current || !agentState.isAuthenticated) return;
+  if (!isRefreshable(current) || !shouldRefreshNow(current, Date.now(), TOKEN_REFRESH_WINDOW_MS)) return;
+  sessionCheckInFlight = true;
+  try {
+    const outcome = await refreshToken(API_URL, current);
+    if (getStoredToken() !== current) return;
+    if (outcome.kind === 'refreshed') applyRefreshedToken(outcome.token);
+    else if (outcome.kind === 'authRejected') await recoverOrExpire(current);
+  } finally {
+    sessionCheckInFlight = false;
+  }
+};
+
+const reportAuthRejected = async (rejectedToken: string): Promise<void> => {
+  if (getAuthMode() !== 'crm' || sessionCheckInFlight || getStoredToken() !== rejectedToken) return;
+  sessionCheckInFlight = true;
+  try {
+    const outcome = await probeToken(`${API_URL}/api/crm/me`, rejectedToken);
+    if (getStoredToken() !== rejectedToken) return;
+    if (outcome === 'rejected') await recoverOrExpire(rejectedToken);
+  } finally {
+    sessionCheckInFlight = false;
+  }
+};
+
+const scheduleSessionCheck = (delayMs = 10_000): void => {
+  setTimeout(() => { checkSessionToken().catch(() => {}); }, delayMs);
+};
+
+const restoreSavedSession = async (): Promise<void> => {
+  const savedToken = getStoredToken();
+  const savedUser = store.get('user') as User | undefined;
+  if (!savedToken || !savedUser) {
+    authCoordinator.signInWithDevice().catch(() => {});
+    showStatusWindow();
+    return;
+  }
+  let activeToken = savedToken;
+  if (isRefreshable(savedToken)) {
+    const outcome = await refreshToken(API_URL, savedToken);
+    if (agentState.isAuthenticated) return;
+    if (outcome.kind === 'authRejected') {
+      resetSessionState(false);
+      authCoordinator.signInWithDevice().catch(() => {});
+      showStatusWindow();
+      return;
+    }
+    if (outcome.kind === 'refreshed') {
+      store.set('crm_token', outcome.token);
+      activeToken = outcome.token;
+    }
+  }
+  agentState.isAuthenticated = true;
+  agentState.user = savedUser;
+  agentState.isAgentOnline = true;
+  updateTrayIcon();
+  tray?.setContextMenu(buildTrayMenu());
+  startAgentServices(activeToken);
+  showStatusWindow();
+};
+
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+const UPDATE_FIRST_CHECK_DELAY_MS = 10_000;
+const UPDATE_CHECK_JITTER_MS = 20_000;
+const LAST_NOTIFIED_UPDATE_KEY = 'lastNotifiedUpdateVersion';
+
+let updateCheckInFlight = false;
+let updateNotification: Notification | null = null;
+
+const announceUpdate = (version: string): void => {
+  if (store.get(LAST_NOTIFIED_UPDATE_KEY) === version) return;
+  store.set(LAST_NOTIFIED_UPDATE_KEY, version);
+  if (!Notification.isSupported()) return;
+  updateNotification = new Notification({
+    title: 'New version available',
+    body: `Version ${version} is ready to download. Open the tray app to get it.`,
+    silent: true,
+  });
+  updateNotification.on('click', () => { showStatusWindow(); });
+  updateNotification.show();
+};
+
+const runUpdateCheck = async (): Promise<void> => {
+  if (updateCheckInFlight || !app.isPackaged) return;
+  updateCheckInFlight = true;
+  try {
+    const latest = await fetchLatestVersion();
+    if (!latest || !isNewerVersion(latest, app.getVersion())) return;
+    if (agentState.updateAvailable?.version === latest) return;
+    agentState.updateAvailable = { version: latest };
+    announceUpdate(latest);
+    broadcastState();
+  } finally {
+    updateCheckInFlight = false;
+  }
+};
+
+const requestUpdateCheck = (): void => {
+  setTimeout(() => { runUpdateCheck().catch(() => {}); }, Math.floor(Math.random() * UPDATE_CHECK_JITTER_MS));
+};
+
+const openUpdateDownload = (): void => {
+  if (!agentState.updateAvailable) return;
+  shell.openExternal(getInstallerUrl()).catch(() => {});
 };
 
 let lastSyncFailReportedAt = 0;
@@ -893,9 +941,11 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       return;
     } catch (err) {
       lastErr = err;
+      if (isAuthRejection(err)) {
+        reportAuthRejected(token).catch(() => {});
+        return;
+      }
       if (attempt < retries) {
-        // Wait 3s before retrying so transient network hiccups don't leave
-        // the tray showing "Not Clocked In" when the user is actually on shift
         await new Promise(resolve => setTimeout(resolve, 3_000));
       }
     }
@@ -913,7 +963,7 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
   }
 };
 
-let tokenRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
+let sessionCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let activityCheckpointIntervalId: ReturnType<typeof setInterval> | null = null;
 const ACTIVITY_CHECKPOINT_MS = 10 * 60 * 1000;
 const IDLE_STRETCH_BACKDATE_CAP_MS = (IDLE_THRESHOLD_SEC + 60) * 1000;
@@ -1074,7 +1124,6 @@ const startAgentServices = async (token: string) => {
   if (agentServicesStarted) return;
   agentServicesStarted = true;
   const SCREENSHOT_INTERVAL_MS = 10 * 60 * 1000;
-  const TOKEN_REFRESH_INTERVAL_MS = 10 * 60 * 60 * 1000; // 10 hours — renew before 12h expiry
 
   // Configure endpoint paths and screenshot mode based on auth mode
   const authMode = getAuthMode();
@@ -1093,6 +1142,10 @@ const startAgentServices = async (token: string) => {
   setOnScreenshotsRequired((required) => {
     if (getAuthMode() === "main") return;
     setSkipCaptures(!!agentState.user?.screenshotExempt || !required);
+  });
+
+  setOnAuthRejected((rejectedToken) => {
+    reportAuthRejected(rejectedToken).catch(() => {});
   });
 
   // Re-apply department flags on startup (not just handleTrayAuth) so Web Dev users keep
@@ -1125,21 +1178,9 @@ const startAgentServices = async (token: string) => {
   // even if break-in socket event was missed and stopScreenshots() wasn’t called.
   setOnBreakGetter(() => agentState.isOnBreak);
 
-  // Proactively renew token every 10 hours (CRM mode only — main JWT is refreshed by the browser)
-  tokenRefreshIntervalId =
+  sessionCheckIntervalId =
     authMode === "crm"
-      ? setInterval(safeAsync(async () => {
-          const current = store.get("crm_token") as string | undefined;
-          if (!current) return;
-          const refreshed = await tryRefreshToken(current);
-          if (!refreshed) {
-            handleLogout();
-            return;
-          }
-          updateHeartbeatToken(refreshed);
-          updateSocketToken(refreshed);
-          updateScreenshotToken(refreshed);
-        }, 'token-refresh'), TOKEN_REFRESH_INTERVAL_MS)
+      ? setInterval(safeAsync(checkSessionToken, 'session-check'), SESSION_CHECK_INTERVAL_MS)
       : null;
 
   startIdleMonitor(
@@ -1548,7 +1589,8 @@ const startAgentServices = async (token: string) => {
           agentState.activityStartMs = activityStartMs;
           const nextIn = Date.now() + SCREENSHOT_INTERVAL_MS;
           agentState.nextScreenshotIn = new Date(nextIn).toISOString();
-          startScreenshots(API_URL, token);
+          const liveToken = getStoredToken();
+          if (liveToken) startScreenshots(API_URL, liveToken);
         }
       }
 
@@ -1559,7 +1601,8 @@ const startAgentServices = async (token: string) => {
       }
 
       broadcastState();
-      flushQueue(API_URL, token).catch(() => {});
+      const queueToken = getStoredToken();
+      if (queueToken) flushQueue(API_URL, queueToken).catch(() => {});
     },
     () => {
       // Read live — this callback outlives the initial login and must not resync
@@ -1578,6 +1621,7 @@ const startAgentServices = async (token: string) => {
   // today) shows up as "Shift Open — Tap Resume" in the tray UI; the user
   // explicitly clicks Resume to opt back into tracking.
   await syncShiftState(token);
+  if (!agentServicesStarted) return;
   if (activityStartMs !== null) {
     // syncShiftState set activityStartMs (recent shift) — propagate to the server
     pingHeartbeat();
@@ -1611,6 +1655,7 @@ const startAgentServices = async (token: string) => {
     try {
       const { data } = await axios.get(`${API_URL}/api/crm/me`, {
         headers: { Authorization: `Bearer ${currentToken}` },
+        params: { platform: process.platform },
         timeout: 10_000,
       });
       const fresh: User = data?.data || data;
@@ -1618,6 +1663,7 @@ const startAgentServices = async (token: string) => {
 
       agentState.user = { ...agentState.user, ...fresh } as User;
       store.set("user", agentState.user);
+      if (fresh.trayDeviceAuthEnabled) authCoordinator.ensureRegistered(currentToken).catch(() => {});
 
       setMainMonitorOnly(!!fresh.mainMonitorOnly);
       setIdleDetectionExempt(!!fresh.idleDetectionExempt);
@@ -1630,24 +1676,30 @@ const startAgentServices = async (token: string) => {
   setTimeout(safeAsync(refreshDepartmentFlags, 'department-flags-refresh-initial'), 30_000);
   departmentFlagsRefreshIntervalId = setInterval(safeAsync(refreshDepartmentFlags, 'department-flags-refresh'), 5 * 60 * 1000);
 
-  // Poll for active call state every 10s — drives recording/Autrix menu visibility
-  startCallStatePolling(
-    API_URL,
-    () => store.get("crm_token") as string | undefined,
-    (_call) => {
-      tray?.setContextMenu(buildTrayMenu());
-      broadcastState();
-    },
-  );
-
-  // Real-time socket — receives tray:start-recording / tray:stop-recording from backend
-  connectTraySocket(token);
+  if (authMode === "crm") {
+    startDesktopLocation({
+      apiUrl: API_URL,
+      platform: process.platform,
+      getToken: getStoredToken,
+      getState: () => ({
+        authMode: getAuthMode(),
+        isAuthenticated: agentState.isAuthenticated,
+        sessionExpired: agentState.sessionExpired,
+        isOnShift: agentState.isOnShift,
+        isOnBreak: agentState.isOnBreak,
+        enabled: !!agentState.user?.desktopLocationEnabled,
+      }),
+      getInputAgeSec: () => powerMonitor.getSystemIdleTime(),
+      onAuthRejected: (rejectedToken) => { reportAuthRejected(rejectedToken).catch(() => {}); },
+      onDiagnostic: (event, message, meta) => { reportDiagnostic(event, message, meta); },
+    });
+  }
 };
 
 const stopAgentServices = () => {
-  if (tokenRefreshIntervalId) {
-    clearInterval(tokenRefreshIntervalId);
-    tokenRefreshIntervalId = null;
+  if (sessionCheckIntervalId) {
+    clearInterval(sessionCheckIntervalId);
+    sessionCheckIntervalId = null;
   }
   if (breakNotifyIntervalId) {
     clearInterval(breakNotifyIntervalId);
@@ -1680,14 +1732,8 @@ const stopAgentServices = () => {
   stopHeartbeat();
   stopScreenshots();
   disconnectSocket();
-  stopCallStatePolling();
-  disconnectTraySocket();
-  destroyRecorderWindow();
+  stopDesktopLocation();
   destroyIdleRecorderWindow();
-  if (autrixWindow && !autrixWindow.isDestroyed()) {
-    autrixWindow.close();
-    autrixWindow = null;
-  }
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -1697,38 +1743,8 @@ const stopAgentServices = () => {
    manual login form in this app anymore.
 ───────────────────────────────────────────────────────────────── */
 const handleLogout = async () => {
-  stopAgentServices();
-  activityStartMs = null;
-  todayTotalActiveMs = 0;
-  wallClockBaseMs = 0;
-  wallClockBaseAt = null;
-  store.delete('crm_token');
-  store.delete('auth_mode');
-  store.delete('user');
-  agentState = {
-    isAuthenticated: false,
-    user: null,
-    isOnShift: false,
-    isOnBreak: false,
-    isIdle: false,
-    isAgentOnline: false,
-    shiftStartedAt: null,
-    breakStartedAt: null,
-    nextScreenshotIn: null,
-    screenshotsToday: 0,
-    totalBreakSeconds: 0,
-    todayTotalWorkedSeconds: 0,
-    activityStartMs: null,
-    todayTotalActiveMs: 0,
-    wallClockBaseMs: 0,
-    wallClockBaseAt: null,
-    // Machine-level, not auth-level — unaffected by signing out.
-    screenRecordingGranted: agentState.screenRecordingGranted,
-    idleRecordingActive: false,
-  };
-  updateTrayIcon();
-  tray?.setContextMenu(buildTrayMenu());
-  broadcastState();
+  resetSessionState(false);
+  authCoordinator.signOut();
   showStatusWindow();
 };
 
@@ -1772,7 +1788,8 @@ ipcMain.handle('shift:resume', async () => {
     await syncShiftState(token);
     return { success: true };
   } catch (err: any) {
-    return { success: false, error: err?.response?.data?.message || 'Failed to resume shift' };
+    if (isAuthRejection(err)) reportAuthRejected(token).catch(() => {});
+    return { success: false, error: describeApiError(err, 'Failed to resume shift') };
   }
 });
 
@@ -1806,15 +1823,8 @@ const performClockAction = async (type: string, note?: string): Promise<{ succes
     }).catch(() => {});
     return { success: true };
   } catch (err: any) {
-    let msg = err?.response?.data?.message || 'Action failed';
-
-    // There is no manual login form in the tray anymore — "log in again" is
-    // stale guidance. The actual recovery path is: the website hands the tray
-    // a fresh token via the "Tray App Required" reconnect flow, so point the
-    // user there instead of telling them to do something that no longer exists.
-    if (/session expired/i.test(msg)) {
-      msg = 'Session expired. Click "Open CRM" below, then try Start Shift again on the website to reconnect.';
-    }
+    if (isAuthRejection(err)) reportAuthRejected(token).catch(() => {});
+    const msg = describeApiError(err, 'Action failed');
 
     // Resume path: backend already has an open clock-in (carried over from a
     // forgotten or older session). The tray no longer auto-tracks on launch for
@@ -1841,39 +1851,17 @@ const performClockAction = async (type: string, note?: string): Promise<{ succes
 
 ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => performClockAction(type, note));
 
-/* ─────────────────────────────────────────────────────────────────
-   Autrix AI IPC handlers
-───────────────────────────────────────────────────────────────── */
-ipcMain.handle('autrix:get-token', () => store.get('crm_token') as string | undefined ?? '');
-ipcMain.handle('autrix:get-api-url', () => API_URL);
-ipcMain.handle('autrix:get-transcript', () => getFullTranscript());
-ipcMain.handle('autrix:get-call-info', () => {
-  const call = getCurrentCall();
-  if (!call) return null;
-  return {
-    title: call.title ?? 'Meeting',
-    meetingId: call.meetingId,
-    isRecording: getRecordingStatus() === 'recording',
-  };
-});
-ipcMain.handle('autrix:close', () => {
-  autrixWindow?.hide();
-});
-ipcMain.handle('autrix:open', () => showAutrixWindow());
-
-ipcMain.handle('recording:start-request', () => {
-  const call = getCurrentCall();
-  if (call && call.canRecord) handleStartRecording(call);
-});
-ipcMain.handle('recording:stop-request', () => handleStopRecording());
+ipcMain.handle('app:download-update', () => openUpdateDownload());
+ipcMain.handle('app:quit', () => { app.quit(); });
+ipcMain.handle('device:sign-in', () => authCoordinator.signInWithDevice({ userInitiated: true }));
 
 /* ─────────────────────────────────────────────────────────────────
    Auth via token — shared by protocol URL and local HTTP server
 ───────────────────────────────────────────────────────────────── */
-const handleTrayAuth = async (token: string): Promise<boolean> => {
+const authenticateWithToken = async (token: string): Promise<boolean> => {
   if (!token) return false;
-  // Same token already active — nothing to do
-  if (agentState.isAuthenticated && store.get('crm_token') === token) return true;
+  const storedToken = getStoredToken();
+  if (agentState.isAuthenticated && (storedToken === token || isStaleSameUserToken(storedToken, token))) return true;
 
   const wasAuthenticated = agentState.isAuthenticated;
   const trackedUsername = agentState.user?.username;
@@ -1884,6 +1872,7 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   try {
     const { data } = await axios.get(`${API_URL}/api/crm/me`, {
       headers: { Authorization: `Bearer ${token}` },
+      params: { platform: process.platform },
       timeout: 10_000,
     });
     const d: User = data?.data || data;
@@ -1925,6 +1914,8 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   }
 
   agentState.isAuthenticated = true;
+  agentState.sessionExpired = false;
+  agentState.connection = null;
   agentState.user = user;
   agentState.isAgentOnline = true;
   setMainMonitorOnly(!!user.mainMonitorOnly);
@@ -1941,10 +1932,31 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
   // auth — a refreshed token arriving while already authenticated used to
   // never reach the socket, leaving it running on the original (eventually
   // stale) token until the app restarted.
-  if (wasAuthenticated) updateSocketToken(token);
-  else startAgentServices(token);
+  if (wasAuthenticated) {
+    updateSocketToken(token);
+    pingHeartbeat();
+    syncShiftState(token).catch(() => {});
+    flushQueue(API_URL, token).catch(() => {});
+  } else {
+    startAgentServices(token);
+  }
+  updateTrayIcon();
+  tray?.setContextMenu(buildTrayMenu());
   broadcastState();
+  scheduleSessionCheck(0);
+  if (authMode === 'crm' && user.trayDeviceAuthEnabled) authCoordinator.ensureRegistered(token).catch(() => {});
   return true;
+};
+
+let trayAuthQueue: Promise<unknown> = Promise.resolve();
+
+const handleTrayAuth = (token: string): Promise<boolean> => {
+  const run = trayAuthQueue.then(
+    () => authenticateWithToken(token),
+    () => authenticateWithToken(token),
+  );
+  trayAuthQueue = run.catch(() => undefined);
+  return run;
 };
 
 /* ─────────────────────────────────────────────────────────────────
@@ -1955,8 +1967,16 @@ const handleTrayAuth = async (token: string): Promise<boolean> => {
 const TRAY_AUTH_PORT = 18642;
 
 const startLocalAuthServer = () => {
+  const allowedOrigins = buildAllowedOrigins({
+    crmUrl: CRM_URL,
+    extra: process.env.TRAY_ALLOWED_ORIGINS,
+    isPackaged: app.isPackaged,
+  });
   const server = http.createServer((req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    const allowedOrigin = matchOrigin(req.headers.origin, allowedOrigins);
+    if (!allowedOrigin) { res.writeHead(403); res.end(); return; }
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+    res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     // Chrome Private Network Access: grants the silent preflight so the
@@ -1971,8 +1991,12 @@ const startLocalAuthServer = () => {
     req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
     req.on('end', async () => {
       try {
-        const { token } = JSON.parse(body) as { token: string };
-        const ok = await handleTrayAuth(token);
+        const { token, bootstrapCode } = JSON.parse(body) as { token: string; bootstrapCode?: string };
+        const ok = typeof bootstrapCode === 'string' && bootstrapCode
+          ? await authCoordinator.handleBootstrap(bootstrapCode, { requireConfirm: false })
+          : authCoordinator.isSignedOutByUser()
+            ? false
+            : await handleTrayAuth(token);
         res.writeHead(ok ? 200 : 401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok }));
       } catch {
@@ -2004,35 +2028,72 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient('actionauto');
 }
 
-const handleProtocolUrl = async (url: string) => {
+const PROTOCOL_PREFIX = 'actionauto://';
+
+let startupComplete = false;
+const pendingProtocolUrls: string[] = [];
+
+const findProtocolUrl = (argv: string[]): string | undefined => argv.find((a) => a.startsWith(PROTOCOL_PREFIX));
+
+const handleProtocolUrl = async (url: string): Promise<boolean> => {
   try {
     const parsed = new URL(url);
-    if (parsed.hostname !== 'auth') return;
+    if (parsed.hostname === 'wake') return await authCoordinator.handleWake();
+    if (parsed.hostname === 'connect') {
+      const code = parsed.searchParams.get('code');
+      return code ? await authCoordinator.handleBootstrap(code, { requireConfirm: true }) : false;
+    }
+    if (parsed.hostname !== 'auth') return false;
     const token = parsed.searchParams.get('token');
-    if (token) await handleTrayAuth(token);
+    return token ? await handleTrayAuth(token) : false;
   } catch {
-    // Silent fail — user can still log in manually
+    return false;
   }
 };
 
-// Windows: protocol URL comes via second-instance argv
+const routeProtocolUrl = (url: string): void => {
+  if (!startupComplete) {
+    pendingProtocolUrls.push(url);
+    return;
+  }
+  handleProtocolUrl(url).catch(() => {});
+};
+
 app.on('second-instance', (_event, argv) => {
-  const url = argv.find(a => a.startsWith('actionauto://'));
-  if (url) handleProtocolUrl(url);
+  const url = findProtocolUrl(argv);
+  if (url) routeProtocolUrl(url);
+  else if (startupComplete) showStatusWindow();
 });
 
-// macOS: comes via open-url event
-app.on('open-url', (_event, url) => handleProtocolUrl(url));
+app.on('open-url', (event, url) => {
+  event.preventDefault();
+  routeProtocolUrl(url);
+});
+
+const AUTO_LAUNCH_CLEANUP_KEY = 'autoLaunchCleanupDone';
+
+const runAutoLaunchCleanupOnce = async (): Promise<void> => {
+  if (store.get(AUTO_LAUNCH_CLEANUP_KEY) === true) return;
+  try { app.setLoginItemSettings({ openAtLogin: false }); } catch {}
+  if (process.platform === 'win32') {
+    try {
+      for (const item of app.getLoginItemSettings().launchItems ?? []) {
+        app.setLoginItemSettings({ openAtLogin: false, path: item.path, args: item.args, name: item.name });
+      }
+    } catch {}
+  }
+  try { await autoLauncher.disable(); } catch {}
+  store.set(AUTO_LAUNCH_CLEANUP_KEY, true);
+};
 
 /* ─────────────────────────────────────────────────────────────────
    App ready
 ───────────────────────────────────────────────────────────────── */
 app.whenReady().then(async () => {
+  if (!gotLock) return;
   // Tray-only app — no dock icon on macOS
   if (process.platform === 'darwin') app.dock?.hide();
-  app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
-  try { autoLauncher.enable(); } catch { } // register with auto-launch as fallback
-  registerRecordingIpcHandlers();
+  runAutoLaunchCleanupOnce().catch(() => {});
   registerIdleRecordingIpcHandlers();
   startLocalAuthServer();
 
@@ -2093,6 +2154,8 @@ app.whenReady().then(async () => {
   };
   powerMonitor.on('suspend', () => handleSystemSuspendOrShutdown('went to sleep'));
   powerMonitor.on('shutdown', () => handleSystemSuspendOrShutdown('shut down'));
+  powerMonitor.on('suspend', pauseDesktopLocation);
+  powerMonitor.on('resume', resumeDesktopLocation);
 
   // Suspend already checkpoints and rolls activityStartMs forward to the
   // moment sleep began (see handleSystemSuspendOrShutdown above) — but nothing
@@ -2114,6 +2177,7 @@ app.whenReady().then(async () => {
   let lastResumeForcedIdleAt = 0;
   powerMonitor.on('resume', () => {
     ensureTray();
+    scheduleSessionCheck();
     if (agentState.isOnShift && !agentState.isOnBreak && activityStartMs !== null) {
       activityStartMs = null;
       agentState.activityStartMs = null;
@@ -2148,7 +2212,10 @@ app.whenReady().then(async () => {
     reportDiagnostic('user_present_cleared_idle', `Cleared stale idle flag on ${source}`, { platform: process.platform });
     broadcastState();
   };
-  powerMonitor.on('unlock-screen', () => handleUserPresent('unlock-screen'));
+  powerMonitor.on('unlock-screen', () => {
+    scheduleSessionCheck();
+    handleUserPresent('unlock-screen');
+  });
   if (process.platform === 'darwin') {
     powerMonitor.on('user-did-become-active', () => handleUserPresent('user-did-become-active'));
   }
@@ -2174,57 +2241,17 @@ app.whenReady().then(async () => {
 
   createStatusWindow();
 
-  const savedToken = store.get('crm_token') as string | undefined;
-  const savedUser = store.get('user');
-  if (savedToken && savedUser) {
-    agentState.isAuthenticated = true;
-    agentState.user = savedUser as User;
-    agentState.isAgentOnline = true;
-    updateTrayIcon();
-    tray?.setContextMenu(buildTrayMenu());
-    // Proactively refresh token on startup (CRM mode only — main JWT is refreshed by the browser)
-    const activeToken = getAuthMode() === 'crm' ? (await tryRefreshToken(savedToken) ?? savedToken) : savedToken;
-    startAgentServices(activeToken);
-  } else {
-    // No saved session — sign-in happens on the dashboard in the browser, which
-    // silently hands a token to startLocalAuthServer() above. Show the waiting
-    // panel so the user knows what's happening instead of a login form.
-    showStatusWindow();
-  }
+  try { store.delete('pendingUpdateRelaunchAt'); } catch {}
 
-  // Check for updates 15s after startup so the app is fully initialized first,
-  // then keep re-checking periodically — this app can stay running for days,
-  // so a single launch-time check isn't enough to catch a new release promptly.
+  const launchUrl = findProtocolUrl(process.argv);
+  const launchAuthenticated = launchUrl ? await handleProtocolUrl(launchUrl) : false;
+  if (!launchAuthenticated) await restoreSavedSession();
+  startupComplete = true;
+  for (const url of pendingProtocolUrls.splice(0)) await handleProtocolUrl(url);
+
   if (app.isPackaged) {
-    setTimeout(() => {
-      if (updateCheckState !== 'idle') return;
-      updateCheckState = 'checking';
-      autoUpdater.checkForUpdatesAndNotify().catch(() => { updateCheckState = 'idle'; });
-    }, 15_000);
-    setInterval(() => {
-      requestUpdateCheck();
-    }, UPDATE_CHECK_INTERVAL_MS);
-
-    // If we're back up after installing a deferred/immediate update, the marker set right
-    // before quitAndInstall() is still there — report exactly how long the gap was instead of
-    // leaving this window a total blind spot (see runQuitAndInstall/checkDeferredInstall).
-    // Delayed so screenshot.ts's apiUrl/token are set (via startScreenshots, part of the normal
-    // become-active flow) before reportDiagnostic is attempted — a plain restart with nothing
-    // pending is a instant no-op read.
-    setTimeout(() => {
-      try {
-        const relaunchMarker = store.get('pendingUpdateRelaunchAt') as number | undefined;
-        if (relaunchMarker) {
-          store.delete('pendingUpdateRelaunchAt');
-          reportDiagnostic('autoupdate_relaunch_complete', 'Tray relaunched after installing an update', {
-            gapMs: Date.now() - relaunchMarker,
-            platform: process.platform,
-            version: app.getVersion(),
-          });
-        }
-      } catch {
-      }
-    }, 20_000);
+    setTimeout(() => { runUpdateCheck().catch(() => {}); }, UPDATE_FIRST_CHECK_DELAY_MS);
+    setInterval(() => { runUpdateCheck().catch(() => {}); }, UPDATE_CHECK_INTERVAL_MS);
   }
 });
 

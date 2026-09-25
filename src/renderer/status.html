@@ -329,109 +329,6 @@
 
     .btn-red { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.25); }
     .btn-red:hover { background: rgba(239,68,68,0.25); }
-
-    /* Call section */
-    .call-section {
-      display: none;
-      padding: 10px 16px 12px;
-      border-bottom: 1px solid #1a1a1a;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .call-section.visible { display: flex; }
-
-    .call-header {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .call-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      font-size: 9px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: #4ade80;
-      background: rgba(74,222,128,0.08);
-      border: 1px solid rgba(74,222,128,0.18);
-      border-radius: 999px;
-      padding: 2px 8px;
-    }
-    .call-badge-dot {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: #4ade80;
-      animation: pulse 1.5s ease-in-out infinite;
-    }
-
-    .call-title {
-      font-size: 11px;
-      color: #8a8a8a;
-      flex: 1;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .call-btns {
-      display: flex;
-      gap: 6px;
-    }
-
-    .btn-record {
-      flex: 1;
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid rgba(239,68,68,0.25);
-      background: rgba(239,68,68,0.08);
-      color: #f87171;
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-      font-family: inherit;
-      transition: background 0.15s;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 5px;
-      letter-spacing: 0.02em;
-    }
-    .btn-record:hover { background: rgba(239,68,68,0.16); }
-    .btn-record.recording {
-      border-color: rgba(239,68,68,0.4);
-      background: rgba(239,68,68,0.15);
-      color: #fca5a5;
-    }
-    .btn-record.saving { opacity: 0.5; cursor: not-allowed; }
-    .btn-record:disabled { opacity: 0.4; cursor: not-allowed; }
-
-    .rec-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #f87171;
-      animation: pulse 1s ease-in-out infinite;
-    }
-
-    .btn-autrix {
-      flex: 1;
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid rgba(139,92,246,0.25);
-      background: rgba(139,92,246,0.08);
-      color: #a78bfa;
-      font-size: 11px;
-      font-weight: 700;
-      cursor: pointer;
-      font-family: inherit;
-      transition: background 0.15s;
-      letter-spacing: 0.02em;
-    }
-    .btn-autrix:hover { background: rgba(139,92,246,0.16); }
   </style>
 </head>
 <body>
@@ -456,12 +353,17 @@
       <button id="fixScreenRecordingBtn" style="width:100%; height:26px; border-radius:6px; border:none; background:#ef4444; color:#fff; font-size:11px; font-weight:700; cursor:pointer;">Fix Now</button>
     </div>
 
+    <div id="updateBanner" style="display:none; margin: 0 12px 10px; padding: 8px 10px; border-radius: 8px; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.3);">
+      <p id="updateBannerText" style="font-size:11px; color:#93c5fd; line-height:1.4; margin:0 0 6px;"></p>
+      <button id="downloadUpdateBtn" style="width:100%; height:26px; border-radius:6px; border:none; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; cursor:pointer;">Download latest version</button>
+    </div>
+
     <!-- Waiting-for-sign-in panel — shown instead of everything below when not yet authenticated -->
     <div class="waiting-panel" id="waitingPanel" style="display:none; padding: 20px 16px;">
-      <p style="font-size:12px; color:#999; line-height:1.6; margin-bottom:14px;">
-        Not signed in yet. Sign in on the dashboard in your browser — this window will connect automatically, no need to log in here.
-      </p>
-      <button class="btn btn-primary" id="openCrmWaitingBtn">Open Dashboard</button>
+      <p id="waitingMessage" style="font-size:12px; color:#999; line-height:1.6; margin-bottom:14px;"></p>
+      <button class="btn btn-primary" id="signInDeviceBtn" style="display:none; margin-bottom:8px;">Sign in</button>
+      <button class="btn btn-primary" id="closeTrayBtn" style="display:none; margin-bottom:8px;">Close Tray App</button>
+      <button class="btn btn-primary" id="openCrmWaitingBtn">Open Website</button>
     </div>
 
     <!-- Status pill -->
@@ -494,20 +396,6 @@
           </svg>
         </span>
         <span class="timer-value" id="screenshotCount">0</span>
-      </div>
-    </div>
-
-    <!-- Call section (shown when activeCall is present) -->
-    <div class="call-section" id="callSection">
-      <div class="call-header">
-        <div class="call-badge">
-          <span class="call-badge-dot"></span>
-          In Call
-        </div>
-        <span class="call-title" id="callTitle">Meeting</span>
-      </div>
-      <div class="call-btns" id="callBtns">
-        <!-- record button injected via JS based on canRecord -->
       </div>
     </div>
 
@@ -601,6 +489,17 @@
   </div>
 
   <script>
+    const CANNOT_CONNECT_MESSAGE = "Can't connect to your tray app. Please close the tray app, open it again, then try again on the website.";
+    const NOT_SIGNED_IN_MESSAGE = 'Not signed in yet. Sign in on the website — this window will connect automatically.';
+    const CONNECTION_ROLE_LABELS = {
+      connecting: 'Connecting',
+      reconnecting: 'Reconnecting',
+      signed_out: 'Signed out',
+      first_setup: 'Setup needed',
+      revoked: 'Disconnected',
+      failed: "Can't connect",
+    };
+
     let state = {};
     let timerInterval = null;
     let breakInterval = null;
@@ -654,18 +553,33 @@
       document.getElementById('screenRecordingBanner').style.display = s.screenRecordingGranted === false ? '' : 'none';
       document.getElementById('idleRecordingBadge').style.display = s.idleRecordingActive ? 'flex' : 'none';
 
+      const updateBanner = document.getElementById('updateBanner');
+      updateBanner.style.display = s.updateAvailable ? '' : 'none';
+      if (s.updateAvailable) {
+        document.getElementById('updateBannerText').textContent =
+          `New version ${s.updateAvailable.version} is available. Download it, close this app, then run the installer.`;
+      }
+
       // Not signed in yet — show the waiting panel only, hide everything shift-related.
       // Signing in happens on the dashboard in the browser; this window picks it up
       // automatically, no login form here.
       const waitingPanel = document.getElementById('waitingPanel');
       const isWaiting = !s.isAuthenticated;
+      const isExpired = isWaiting && !!s.sessionExpired;
       waitingPanel.style.display = isWaiting ? '' : 'none';
       document.querySelector('.status-section').style.display = isWaiting ? 'none' : '';
       document.querySelector('.timers').style.display = isWaiting ? 'none' : '';
       document.getElementById('signOutBtn').style.display = isWaiting ? 'none' : '';
       if (isWaiting) {
+        const connection = s.connection;
+        const isSignedOut = !!connection && connection.state === 'signed_out';
+        const showExpiredCopy = isExpired && !connection;
+        document.getElementById('waitingMessage').textContent = connection ? connection.message : (isExpired ? CANNOT_CONNECT_MESSAGE : NOT_SIGNED_IN_MESSAGE);
+        document.getElementById('signInDeviceBtn').style.display = isSignedOut ? '' : 'none';
+        document.getElementById('closeTrayBtn').style.display = showExpiredCopy ? '' : 'none';
+        document.getElementById('openCrmWaitingBtn').className = showExpiredCopy || isSignedOut ? 'btn btn-ghost' : 'btn btn-primary';
         document.getElementById('userName').textContent = 'Suprah AI - Timeproof Clock';
-        document.getElementById('userRole').textContent = 'Waiting for sign-in';
+        document.getElementById('userRole').textContent = connection ? (CONNECTION_ROLE_LABELS[connection.state] || 'Waiting for sign-in') : (isExpired ? "Can't connect" : 'Waiting for sign-in');
         document.getElementById('avatar').textContent = 'AA';
         document.getElementById('agentDot').className = 'agent-dot offline';
         updateButtons(s);
@@ -937,74 +851,25 @@
       window.trayAPI.openCRM();
     });
 
+    document.getElementById('signInDeviceBtn').addEventListener('click', () => {
+      window.trayAPI.signInDevice();
+    });
+
+    document.getElementById('closeTrayBtn').addEventListener('click', () => {
+      window.trayAPI.quitApp();
+    });
+
+    document.getElementById('downloadUpdateBtn').addEventListener('click', () => {
+      window.trayAPI.downloadUpdate();
+    });
+
     document.getElementById('signOutBtn').addEventListener('click', async () => {
       await window.trayAPI.logout();
     });
 
-    // ── Call section ─────────────────────────────────────────────────
-    let recordingState = 'idle'; // 'idle' | 'recording' | 'saving'
-
-    const updateCallSection = (s) => {
-      const section = document.getElementById('callSection');
-      const callBtns = document.getElementById('callBtns');
-
-      if (!s.activeCall) {
-        section.classList.remove('visible');
-        return;
-      }
-
-      section.classList.add('visible');
-      document.getElementById('callTitle').textContent = s.activeCall.title || 'Meeting';
-
-      // Sync local recording state from authoritative server state
-      if (s.activeCall.isRecording && recordingState !== 'saving') recordingState = 'recording';
-      else if (!s.activeCall.isRecording && recordingState === 'recording') recordingState = 'idle';
-
-      // Rebuild buttons
-      callBtns.innerHTML = '';
-
-      if (s.activeCall.canRecord) {
-        const recBtn = document.createElement('button');
-        recBtn.className = 'btn-record' +
-          (recordingState === 'recording' ? ' recording' : '') +
-          (recordingState === 'saving' ? ' saving' : '');
-        recBtn.disabled = recordingState === 'saving';
-
-        if (recordingState === 'recording') {
-          recBtn.innerHTML = '<span class="rec-dot"></span> Stop & Save';
-        } else if (recordingState === 'saving') {
-          recBtn.textContent = 'Saving…';
-        } else {
-          recBtn.textContent = '⏺ Record';
-        }
-
-        recBtn.addEventListener('click', async () => {
-          if (recordingState === 'idle') {
-            recordingState = 'recording';
-            updateCallSection(state);
-            await window.trayAPI.startRecording();
-          } else if (recordingState === 'recording') {
-            recordingState = 'saving';
-            updateCallSection(state);
-            await window.trayAPI.stopRecording();
-            recordingState = 'idle';
-            updateCallSection(state);
-          }
-        });
-
-        callBtns.appendChild(recBtn);
-      }
-
-      const autrixBtn = document.createElement('button');
-      autrixBtn.className = 'btn-autrix';
-      autrixBtn.textContent = '✦ Autrix';
-      autrixBtn.addEventListener('click', () => window.trayAPI.openAutrix());
-      callBtns.appendChild(autrixBtn);
-    };
-
     // ── State sync ───────────────────────────────────────────────────
-    window.trayAPI.onStatusUpdate((data) => { applyState(data); updateCallSection(data); });
-    window.trayAPI.getStatus().then((data) => { applyState(data); updateCallSection(data); });
+    window.trayAPI.onStatusUpdate((data) => { applyState(data); });
+    window.trayAPI.getStatus().then((data) => { applyState(data); });
     window.trayAPI.getAppVersion().then(v => {
       document.getElementById('appVersion').textContent = `v${v}`;
     });

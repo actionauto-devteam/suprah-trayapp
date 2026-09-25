@@ -3,6 +3,7 @@ import { app } from 'electron';
 import { getIsIdle } from './idle';
 import { getScreenRecordingGranted } from './permissions';
 import { reportDiagnostic } from './screenshot';
+import { isAuthRejection } from './session';
 
 const INTERVAL_MS = 60_000;
 const PING_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
@@ -15,9 +16,14 @@ let heartbeatPath = '/api/crm/timeproof/heartbeat';
 let _activeToken = '';
 let lastPingFailReportedAt = 0;
 let _onScreenshotsRequired: ((required: boolean) => void) | null = null;
+let _onAuthRejected: ((rejectedToken: string) => void) | null = null;
 
 export function setOnScreenshotsRequired(cb: (required: boolean) => void): void {
   _onScreenshotsRequired = cb;
+}
+
+export function setOnAuthRejected(cb: (rejectedToken: string) => void): void {
+  _onAuthRejected = cb;
 }
 
 export function setHeartbeatPath(path: string): void {
@@ -33,6 +39,7 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
   _activeToken = token;
 
   _ping = async () => {
+    const usedToken = _activeToken;
     try {
       const { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt } = getShiftState();
       const isIdle = isOnBreak || !isOnShift ? false : getIsIdle();
@@ -43,11 +50,15 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
           screenRecordingGranted: getScreenRecordingGranted(),
           appVersion: app.getVersion(),
         },
-        { headers: { Authorization: `Bearer ${_activeToken}` }, timeout: 10_000 }
+        { headers: { Authorization: `Bearer ${usedToken}` }, timeout: 10_000 }
       );
       const screenshotsRequired = (res.data?.data ?? res.data)?.screenshotsRequired;
       if (typeof screenshotsRequired === 'boolean') _onScreenshotsRequired?.(screenshotsRequired);
     } catch (err) {
+      if (isAuthRejection(err)) {
+        _onAuthRejected?.(usedToken);
+        return;
+      }
       const now = Date.now();
       if (now - lastPingFailReportedAt > PING_FAIL_REPORT_COOLDOWN_MS) {
         lastPingFailReportedAt = now;
@@ -77,5 +88,6 @@ export function stopHeartbeat(): void {
   _ping = null;
   _activeToken = '';
   _onScreenshotsRequired = null;
+  _onAuthRejected = null;
   heartbeatPath = '/api/crm/timeproof/heartbeat';
 }

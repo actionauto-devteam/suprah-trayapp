@@ -309,18 +309,6 @@ async function captureAllScreens(): Promise<Buffer | null> {
 // enqueued when the first call's stale snapshot overwrites the file on its own eventual save.
 let captureInFlight: Promise<void> | null = null;
 
-/** Lets the auto-updater wait out any in-progress capture/upload before quitAndInstall —
- * otherwise a screenshot mid-upload (still only in memory, not yet queued to disk) is lost
- * outright when the process is killed underneath it. */
-export async function waitForCaptureToFinish(): Promise<void> {
-  if (captureInFlight) {
-    try {
-      await captureInFlight;
-    } catch {
-    }
-  }
-}
-
 async function captureAndUpload(): Promise<void> {
   // Skip regular interval captures while idle, on break, or in skip mode (e.g. main-auth users)
   if (skipCaptures || getIsIdle() || getIsOnBreak()) return;
