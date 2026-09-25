@@ -159,6 +159,7 @@ let screenRecordingCheckIntervalId: ReturnType<typeof setInterval> | null = null
 let lastNotifiedScreenRecordingMissing = false;
 let resyncIntervalId: ReturnType<typeof setInterval> | null = null;
 let departmentFlagsRefreshIntervalId: ReturnType<typeof setInterval> | null = null;
+let refreshDepartmentFlagsNow: (() => Promise<void>) | null = null;
 let autoClockoutCheckIntervalId: ReturnType<typeof setInterval> | null = null;
 let breakExceededNotified = false;
 let autoClockoutTriggeredForThisIdleStretch = false;
@@ -1613,6 +1614,9 @@ const startAgentServices = async (token: string) => {
     () => {
       requestUpdateCheck();
     },
+    () => {
+      refreshDepartmentFlagsNow?.().catch(() => {});
+    },
   );
 
   // Sync state. syncShiftState already handles auto-resume tracking (gated to
@@ -1673,6 +1677,7 @@ const startAgentServices = async (token: string) => {
       // Best-effort — keep whatever flags are already cached; next tick retries.
     }
   };
+  refreshDepartmentFlagsNow = refreshDepartmentFlags;
   setTimeout(safeAsync(refreshDepartmentFlags, 'department-flags-refresh-initial'), 30_000);
   departmentFlagsRefreshIntervalId = setInterval(safeAsync(refreshDepartmentFlags, 'department-flags-refresh'), 5 * 60 * 1000);
 
@@ -1709,6 +1714,7 @@ const stopAgentServices = () => {
     clearInterval(resyncIntervalId);
     resyncIntervalId = null;
   }
+  refreshDepartmentFlagsNow = null;
   if (departmentFlagsRefreshIntervalId) {
     clearInterval(departmentFlagsRefreshIntervalId);
     departmentFlagsRefreshIntervalId = null;

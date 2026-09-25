@@ -22,6 +22,7 @@ export function connectSocket(
   onStateChange: StateChangeCallback,
   onReconnect?: () => void,
   onUpdateCheckRequested?: () => void,
+  onMonitoringDeviceChanged?: () => void,
 ): void {
   if (socket?.connected) return;
   currentToken = token;
@@ -76,6 +77,10 @@ export function connectSocket(
   // immediately instead of waiting for the next periodic poll.
   socket.on('tray:check-update', () => {
     onUpdateCheckRequested?.();
+  });
+
+  socket.on('monitoring-device', () => {
+    onMonitoringDeviceChanged?.();
   });
 }
 
