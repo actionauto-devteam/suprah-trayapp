@@ -3,6 +3,7 @@ import path from 'path';
 import { app } from 'electron';
 import FormData from 'form-data';
 import axios from 'axios';
+import { isTrayStandbyRejection } from './trayIdentity';
 
 interface QueueEntry {
   filePath: string;
@@ -60,7 +61,11 @@ export async function flushQueue(apiUrl: string, token: string): Promise<number>
 
       fs.unlinkSync(entry.filePath); // clean up local copy after upload
       uploaded++;
-    } catch {
+    } catch (err) {
+      if (isTrayStandbyRejection(err)) {
+        try { fs.unlinkSync(entry.filePath); } catch {}
+        continue;
+      }
       remaining.push(entry); // retry next time
     }
   }

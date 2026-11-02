@@ -1,6 +1,6 @@
 {
   "name": "actionauto-tray",
-  "version": "1.5.5",
+  "version": "1.5.6",
   "description": "Suprah AI - Timeproof Clock",
   "main": "dist/main.js",
   "author": "Action Auto",
@@ -35,7 +35,8 @@
     "publish": {
       "provider": "github",
       "owner": "actionauto-devteam",
-      "repo": "suprah-trayapp"
+      "repo": "suprah-trayapp",
+      "releaseType": "prerelease"
     },
     "win": {
       "target": "nsis",

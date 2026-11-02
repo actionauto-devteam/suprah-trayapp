@@ -4,6 +4,8 @@ import path from 'path';
 import axios from 'axios';
 import FormData from 'form-data';
 import { getIsIdle } from './idle';
+import { companyDateStr } from './companyTime';
+import { isTrayStandbyRejection, notifyStandbyRejected } from './trayIdentity';
 import { enqueue, flushQueue } from './offline-queue';
 import { getScreenRecordingGranted } from './permissions';
 
@@ -19,6 +21,7 @@ let captureFailedCb: (() => void) | null = null;
 let lastCaptureFailedAt = 0;
 let getIsOnBreak: () => boolean = () => false;
 let skipCaptures = false;
+let standby = false;
 // Tracks the last time a capture actually produced an outcome (uploaded
 // directly OR saved to the offline queue for later — both mean the pipeline
 // itself is working, just network availability differs) versus merely being
@@ -36,6 +39,10 @@ let mainMonitorOnly = false;
 
 export function setSkipCaptures(skip: boolean): void {
   skipCaptures = skip;
+}
+
+export function setScreenshotStandby(value: boolean): void {
+  standby = value;
 }
 
 export function setMainMonitorOnly(value: boolean): void {
@@ -109,12 +116,7 @@ export async function reportDiagnostic(event: string, message: string, meta?: Re
   }
 }
 
-// Use MDT (UTC-6) so shiftDate matches the backend's COMPANY_TZ_OFFSET_MINUTES = -360
-const MDT_OFFSET_MS = -6 * 60 * 60 * 1000;
-export const toShiftDate = () => {
-  const mdt = new Date(Date.now() + MDT_OFFSET_MS);
-  return `${mdt.getUTCFullYear()}-${String(mdt.getUTCMonth() + 1).padStart(2, '0')}-${String(mdt.getUTCDate()).padStart(2, '0')}`;
-};
+export const toShiftDate = () => companyDateStr();
 
 // Small on-screen indication of how many screenshots have actually gone through today —
 // persisted to disk so a tray restart mid-day (auto-update, crash, manual restart) resumes
@@ -311,7 +313,7 @@ let captureInFlight: Promise<void> | null = null;
 
 async function captureAndUpload(): Promise<void> {
   // Skip regular interval captures while idle, on break, or in skip mode (e.g. main-auth users)
-  if (skipCaptures || getIsIdle() || getIsOnBreak()) return;
+  if (standby || skipCaptures || getIsIdle() || getIsOnBreak()) return;
   if (captureInFlight) return; // previous cycle still finishing — skip this tick instead of overlapping
 
   captureInFlight = runCaptureAndUpload();
@@ -368,7 +370,11 @@ async function runCaptureAndUpload(): Promise<void> {
       });
       lastCaptureOutcomeAt = Date.now();
       bumpTodayCount();
-    } catch {
+    } catch (err) {
+      if (isTrayStandbyRejection(err)) {
+        notifyStandbyRejected();
+        return;
+      }
       // No internet — save locally and queue for later
       const localDir = path.join(app.getPath('userData'), 'screenshot-cache', shiftDate);
       if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
@@ -411,6 +417,7 @@ export async function captureAndUploadOnce(
   breakEvent?: 'break-in' | 'break-out',
   idleStage?: 1 | 2 | 3,
 ): Promise<boolean> {
+  if (standby) return false;
   try {
     const jpegBuffer = await captureAllScreens();
     if (!jpegBuffer) return false;
@@ -433,7 +440,11 @@ export async function captureAndUploadOnce(
       });
       bumpTodayCount();
       return true;
-    } catch {
+    } catch (err) {
+      if (isTrayStandbyRejection(err)) {
+        notifyStandbyRejected();
+        return false;
+      }
       const localDir = path.join(app.getPath('userData'), 'screenshot-cache', shiftDate);
       if (!fs.existsSync(localDir)) fs.mkdirSync(localDir, { recursive: true });
       const filePath = path.join(localDir, `${Date.now()}.jpg`);

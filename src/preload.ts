@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('trayAPI', {
   getAppVersion: () => ipcRenderer.invoke('app:get-version'),
   openScreenRecordingSettings: () => ipcRenderer.invoke('app:open-screen-recording-settings'),
   downloadUpdate: () => ipcRenderer.invoke('app:download-update'),
+  downloadUpdateManually: () => ipcRenderer.invoke('app:download-update-manually'),
   quitApp: () => ipcRenderer.invoke('app:quit'),
   signInDevice: () => ipcRenderer.invoke('device:sign-in'),
 

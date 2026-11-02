@@ -14,12 +14,14 @@ const envPath = app.isPackaged
   : path.join(__dirname, '..', '.env');
 dotenv.config({ path: envPath });
 import { connectSocket, disconnectSocket, updateSocketToken } from './socket';
-import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC, getLastIdleSeconds, isLastIdleSampleReliable } from './idle';
-import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired, setOnAuthRejected } from './heartbeat';
-import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, toShiftDate } from './screenshot';
+import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecondsHistory, forceIdleState, IDLE_THRESHOLD_SEC, getLastIdleSeconds, isLastIdleSampleReliable, getShouldRecordIdleVideo } from './idle';
+import { companyDayStartUtcMs } from './companyTime';
+import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired, setOnAuthRejected, setOnStandbyChange } from './heartbeat';
+import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setScreenshotStandby, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, toShiftDate } from './screenshot';
+import { getOrCreateTrayId, installTrayIdentity, isTrayStandbyRejection, setStandbyRejectedHandler } from './trayIdentity';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
-import { startIdleRecording, stopAndUploadIdleRecording, destroyIdleRecorderWindow, registerIdleRecordingIpcHandlers, getIdleRecordingStatus } from './idleRecording';
+import { startIdleRecording, stopAndUploadIdleRecording, stopAndDiscardIdleRecording, destroyIdleRecorderWindow, registerIdleRecordingIpcHandlers, getIdleRecordingStatus } from './idleRecording';
 import { flushIdleRecordingQueue } from './idleRecordingQueue';
 import { SESSION_CHECK_INTERVAL_MS, TOKEN_REFRESH_WINDOW_MS, isAuthRejection, isStaleSameUserToken, probeToken, readTokenClaims, refreshToken, shouldRefreshNow } from './session';
 import { isNewerVersion } from './version';
@@ -34,7 +36,8 @@ import {
   saveDeviceCredential,
   setAutoSignInPaused,
 } from './deviceStorage';
-import { fetchLatestVersion, getInstallerUrl } from './updateCheck';
+import { fetchLatestVersion, getInstallerUrl, fetchInstallerSha512, downloadInstaller } from './updateCheck';
+import { spawn } from 'child_process';
 import { startDesktopLocation, stopDesktopLocation, pauseDesktopLocation, resumeDesktopLocation } from './desktopLocation';
 
 const AutoLaunch = require('auto-launch') as new (opts: { name: string; isHidden: boolean }) => { disable: () => Promise<unknown> };
@@ -106,6 +109,11 @@ const safeAsync = (fn: () => Promise<void>, label: string) => async () => {
 const CRM_URL = process.env.CRM_URL || 'https://your-crm-url.com/crm';
 const API_URL = process.env.API_URL || 'https://your-api-url.com';
 
+installTrayIdentity(
+  getOrCreateTrayId(() => store.get('trayInstanceId'), (id) => store.set('trayInstanceId', id)),
+  API_URL,
+);
+
 const autoLauncher = new AutoLaunch({ name: 'Suprah AI - Timeproof Clock', isHidden: true });
 
 /* ─────────────────────────────────────────────────────────────────
@@ -146,8 +154,10 @@ interface AgentState {
   // macOS-only flag; null elsewhere or before first check, not guaranteed stable once granted (unsigned build).
   screenRecordingGranted: boolean | null;
   idleRecordingActive: boolean;
+  standby: boolean;
   sessionExpired: boolean;
   updateAvailable: { version: string } | null;
+  updateProgress: { stage: 'downloading' | 'installing' | 'opened' | 'error'; percent: number | null } | null;
   connection: { state: ConnectionState; message: string } | null;
 }
 
@@ -219,8 +229,10 @@ const createAgentState = (): AgentState => ({
   wallClockBaseAt: null,
   screenRecordingGranted: null,
   idleRecordingActive: false,
+  standby: false,
   sessionExpired: false,
   updateAvailable: null,
+  updateProgress: null,
   connection: null,
 });
 
@@ -231,6 +243,7 @@ let agentState: AgentState = createAgentState();
 ───────────────────────────────────────────────────────────────── */
 const STATUS_HEIGHT_BASE = 460;
 const SCREEN_RECORDING_BANNER_HEIGHT = 60;
+const STANDBY_BANNER_HEIGHT = 96;
 const UPDATE_BANNER_HEIGHT = 100;
 
 let lastTraySignature = '';
@@ -238,6 +251,7 @@ let lastTraySignature = '';
 const getStatusWindowTargetHeight = (): number =>
   STATUS_HEIGHT_BASE
   + (agentState.screenRecordingGranted === false ? SCREEN_RECORDING_BANNER_HEIGHT : 0)
+  + (agentState.standby ? STANDBY_BANNER_HEIGHT : 0)
   + (agentState.updateAvailable ? UPDATE_BANNER_HEIGHT : 0);
 
 const fitStatusWindow = (): void => {
@@ -264,7 +278,9 @@ const broadcastState = () => {
     agentState.isIdle,
     agentState.isOnBreak,
     agentState.sessionExpired,
+    agentState.standby,
     agentState.updateAvailable?.version ?? '',
+    agentState.updateProgress?.stage ?? '',
     agentState.connection?.state ?? '',
   ].join('|');
   if (traySignature !== lastTraySignature) {
@@ -370,7 +386,10 @@ const buildTrayMenu = () => {
 
   if (agentState.updateAvailable) {
     items.push({ type: 'separator' });
-    items.push({ label: `Download latest version (v${agentState.updateAvailable.version})`, click: openUpdateDownload });
+    items.push({ label: `Update to latest version (v${agentState.updateAvailable.version})`, click: () => { installUpdate().catch(() => {}); } });
+    if (agentState.updateProgress?.stage === 'error') {
+      items.push({ label: 'Download installer manually', click: openUpdateDownload });
+    }
   }
 
   items.push({ type: 'separator' });
@@ -636,6 +655,7 @@ const resetSessionState = (expired: boolean): void => {
     sessionExpired: expired,
     screenRecordingGranted: agentState.screenRecordingGranted,
     updateAvailable: agentState.updateAvailable,
+    updateProgress: agentState.updateProgress,
     screenshotsToday: agentState.screenshotsToday,
     connection: agentState.connection,
   };
@@ -768,9 +788,83 @@ const requestUpdateCheck = (): void => {
   setTimeout(() => { runUpdateCheck().catch(() => {}); }, Math.floor(Math.random() * UPDATE_CHECK_JITTER_MS));
 };
 
+let standbyNotified = false;
+
+const handleStandbyChange = (standby: boolean): void => {
+  if (agentState.standby === standby) return;
+  agentState.standby = standby;
+  setScreenshotStandby(standby);
+  if (standby) {
+    stopScreenshots();
+    agentState.nextScreenshotIn = null;
+    if (getIdleRecordingStatus() === 'recording') {
+      idleStretchStartMs = null;
+      currentIdleChunkIndex = null;
+      agentState.idleRecordingActive = false;
+      stopAndDiscardIdleRecording().catch(() => {});
+    }
+    activityStartMs = null;
+    agentState.activityStartMs = null;
+    if (!standbyNotified && Notification.isSupported()) {
+      standbyNotified = true;
+      new Notification({
+        title: 'Timeproof is running on another computer',
+        body: 'This computer is on standby — no screenshots or idle tracking here. To switch, take a break or end your shift on the other computer, then continue here.',
+        silent: true,
+      }).show();
+    }
+    broadcastState();
+    return;
+  }
+  standbyNotified = false;
+  broadcastState();
+  const token = store.get('crm_token') as string | undefined;
+  if (token && agentState.isAuthenticated) syncShiftState(token).catch(() => {});
+};
+
 const openUpdateDownload = (): void => {
   if (!agentState.updateAvailable) return;
   shell.openExternal(getInstallerUrl()).catch(() => {});
+};
+
+let updateInstallInFlight = false;
+let lastProgressBroadcastAt = 0;
+
+const setUpdateProgress = (progress: AgentState['updateProgress'], force = false): void => {
+  agentState.updateProgress = progress;
+  const now = Date.now();
+  if (!force && now - lastProgressBroadcastAt < 400) return;
+  lastProgressBroadcastAt = now;
+  broadcastState();
+};
+
+const installUpdate = async (): Promise<void> => {
+  if (!agentState.updateAvailable || updateInstallInFlight) return;
+  updateInstallInFlight = true;
+  setUpdateProgress({ stage: 'downloading', percent: 0 }, true);
+  try {
+    const expectedSha512 = await fetchInstallerSha512();
+    const installerPath = await downloadInstaller(expectedSha512, (percent) => {
+      setUpdateProgress({ stage: 'downloading', percent });
+    });
+    if (process.platform === 'win32') {
+      setUpdateProgress({ stage: 'installing', percent: 100 }, true);
+      const child = spawn(installerPath, ['/S', '--updated', '--force-run'], { detached: true, stdio: 'ignore' });
+      child.unref();
+      setTimeout(() => app.quit(), 1500);
+      return;
+    }
+    const openError = await shell.openPath(installerPath);
+    if (openError) throw new Error(openError);
+    setUpdateProgress({ stage: 'opened', percent: 100 }, true);
+  } catch (err) {
+    reportDiagnostic('update_install_failed', 'In-app update failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    setUpdateProgress({ stage: 'error', percent: null }, true);
+  } finally {
+    updateInstallInFlight = false;
+  }
 };
 
 let lastSyncFailReportedAt = 0;
@@ -816,12 +910,7 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
       todayTotalActiveMs = (s.todayTotalActiveSeconds ?? 0) * 1000;
       agentState.todayTotalActiveMs = todayTotalActiveMs;
 
-      // Reset activityStartMs if it predates today’s MDT midnight (UTC midnight +6h) to avoid showing yesterday’s elapsed time as today’s work.
-      const MDT_OFFSET_MS = -6 * 60 * 60 * 1000; // UTC-6
-      const nowInMDT = new Date(Date.now() + MDT_OFFSET_MS);
-      const todayMDTDateStr = nowInMDT.toISOString().split("T")[0];
-      const todayMDTMidnightUTC =
-        new Date(todayMDTDateStr + "T00:00:00.000Z").getTime() - MDT_OFFSET_MS;
+      const todayMDTMidnightUTC = companyDayStartUtcMs();
       if (activityStartMs !== null && activityStartMs < todayMDTMidnightUTC) {
         activityStartMs = null;
         agentState.activityStartMs = null;
@@ -982,6 +1071,7 @@ const CHECKPOINT_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
 
 const commitActiveSegment = async (endAtRaw: Date): Promise<boolean> => {
   if (activityStartMs === null) return true;
+  if (agentState.standby) return true;
   // A backdated endAt (e.g. onIdleChange's idle-onset estimate) can land before
   // activityStartMs if activityStartMs was already advanced past that point by an intervening
   // periodic checkpoint that didn't yet know idle time was building up. Clamping here — instead
@@ -1009,6 +1099,10 @@ const commitActiveSegment = async (endAtRaw: Date): Promise<boolean> => {
     agentState.todayTotalActiveMs = todayTotalActiveMs;
     return true;
   } catch (err) {
+    if (isTrayStandbyRejection(err)) {
+      handleStandbyChange(true);
+      return true;
+    }
     const now = Date.now();
     if (now - lastCheckpointFailReportedAt > CHECKPOINT_FAIL_REPORT_COOLDOWN_MS) {
       lastCheckpointFailReportedAt = now;
@@ -1103,6 +1197,11 @@ const startIdleVideoChunk = async (chunkIndex: 1 | 2 | 3): Promise<boolean> => {
   const started = await startIdleRecording(windowEndMs, IDLE_VIDEO_BOOKEND_MS);
   if (!started) return false;
 
+  if (chunkIndex === 1 && !getShouldRecordIdleVideo()) {
+    await stopAndDiscardIdleRecording();
+    return false;
+  }
+
   if (chunkIndex === 1) {
     idleStretchStartMs = resolvedStartMs!;
   }
@@ -1149,6 +1248,9 @@ const startAgentServices = async (token: string) => {
     reportAuthRejected(rejectedToken).catch(() => {});
   });
 
+  setOnStandbyChange(handleStandbyChange);
+  setStandbyRejectedHandler(() => handleStandbyChange(true));
+
   // Re-apply department flags on startup (not just handleTrayAuth) so Web Dev users keep
   // mainMonitorOnly/idleDetectionExempt across auto-update relaunches; otherwise they silently reset to false.
   checkScreenRecordingPermission();
@@ -1188,6 +1290,10 @@ const startAgentServices = async (token: string) => {
     async (isIdle) => {
       const wasIdle = agentState.isIdle;
       agentState.isIdle = isIdle;
+      if (agentState.standby) {
+        broadcastState();
+        return;
+      }
 
       // Activity tracking only applies while the user is clocked in and not on break.
       // Deliberately NOT checking activityStartMs here — the "became active" branch
@@ -1290,12 +1396,29 @@ const startAgentServices = async (token: string) => {
       });
     },
     async (shouldRecord) => {
-      if (!shouldRecord) return;
+      if (shouldRecord && agentState.standby) return;
+      if (!shouldRecord) {
+        if (getIdleRecordingStatus() === 'recording' && currentIdleChunkIndex === 1) {
+          idleStretchStartMs = null;
+          currentIdleChunkIndex = null;
+          agentState.idleRecordingActive = false;
+          broadcastState();
+          await stopAndDiscardIdleRecording();
+        } else {
+          stopIdleVideoIfRecording("partial");
+        }
+        if (agentState.idleRecordingActive && getIdleRecordingStatus() !== 'recording') {
+          agentState.idleRecordingActive = false;
+          broadcastState();
+        }
+        return;
+      }
       const wasTracking = agentState.isOnShift && !agentState.isOnBreak;
       if (!wasTracking || activityStartMs === null) return;
       await startIdleVideoChunk(1);
     },
     async (stage, idleSeconds) => {
+      if (agentState.standby) return;
       // Stages 2 (20min) and 3 (30min) — stage 1 (10min) is the existing
       // isIdle transition above, unchanged. Each stage stops the chunk that's
       // been recording since the previous stage, captures a fresh stage-
@@ -1401,7 +1524,7 @@ const startAgentServices = async (token: string) => {
   // the last check happened to run.
   autoClockoutTriggeredForThisIdleStretch = false;
   autoClockoutCheckIntervalId = setInterval(safeAsync(async () => {
-    if (!agentState.isOnShift || agentState.isOnBreak) {
+    if (!agentState.isOnShift || agentState.isOnBreak || agentState.standby) {
       autoClockoutTriggeredForThisIdleStretch = false;
       return;
     }
@@ -1857,7 +1980,8 @@ const performClockAction = async (type: string, note?: string): Promise<{ succes
 
 ipcMain.handle('timeclock:action', async (_e, type: string, note?: string) => performClockAction(type, note));
 
-ipcMain.handle('app:download-update', () => openUpdateDownload());
+ipcMain.handle('app:download-update', () => installUpdate());
+ipcMain.handle('app:download-update-manually', () => openUpdateDownload());
 ipcMain.handle('app:quit', () => { app.quit(); });
 ipcMain.handle('device:sign-in', () => authCoordinator.signInWithDevice({ userInitiated: true }));
 

@@ -4,6 +4,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { reportDiagnostic } from './screenshot';
 import { enqueueIdleRecording, flushIdleRecordingQueue } from './idleRecordingQueue';
+import { isTrayStandbyRejection, notifyStandbyRejected } from './trayIdentity';
 
 export type IdleRecordingStatus = 'idle' | 'recording' | 'uploading';
 
@@ -120,6 +121,16 @@ async function collectRecordingBuffer(): Promise<Buffer | null> {
   });
 }
 
+export async function stopAndDiscardIdleRecording(): Promise<void> {
+  if (status !== 'recording') return;
+  setStatus('uploading');
+  try {
+    await collectRecordingBuffer();
+  } finally {
+    setStatus('idle');
+  }
+}
+
 export async function stopAndUploadIdleRecording(
   apiUrl: string,
   authToken: string,
@@ -158,6 +169,10 @@ export async function stopAndUploadIdleRecording(
     reportDiagnostic('idle_recording_uploaded', 'Idle proof recording uploaded', { proofStatus, chunkIndex, bytes: webmBuffer.length });
   } catch (err) {
     setStatus('idle');
+    if (isTrayStandbyRejection(err)) {
+      notifyStandbyRejected();
+      return;
+    }
     if (webmBuffer) {
       try {
         enqueueIdleRecording(webmBuffer, shiftDate, idleStartMs, chunkIndex, proofStatus);

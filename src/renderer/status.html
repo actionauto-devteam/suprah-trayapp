@@ -320,6 +320,9 @@
       width: 100%;
     }
     .modal-field textarea { resize: none; }
+    .modal-field textarea.needs-more { border-color: rgba(248,113,113,0.6); }
+    .modal-field-hint { font-size: 10px; color: #f87171; }
+    .modal-field-hint.ok { color: #34d399; }
     .modal-field select:focus, .modal-field textarea:focus { border-color: rgba(251,146,60,0.4); }
 
     .modal-confirm-body { padding: 16px 14px; display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
@@ -353,9 +356,15 @@
       <button id="fixScreenRecordingBtn" style="width:100%; height:26px; border-radius:6px; border:none; background:#ef4444; color:#fff; font-size:11px; font-weight:700; cursor:pointer;">Fix Now</button>
     </div>
 
+    <div id="standbyBanner" style="display:none; margin: 0 12px 10px; padding: 8px 10px; border-radius: 8px; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.35);">
+      <p style="font-size:11px; color:#fcd34d; font-weight:700; line-height:1.4; margin:0 0 3px;">Timeproof is running on another computer</p>
+      <p style="font-size:10.5px; color:#fde68a; line-height:1.45; margin:0;">This computer is on standby — no screenshots or idle tracking here. To switch, take a break or end your shift on the other computer, then continue here.</p>
+    </div>
+
     <div id="updateBanner" style="display:none; margin: 0 12px 10px; padding: 8px 10px; border-radius: 8px; background: rgba(59,130,246,0.12); border: 1px solid rgba(59,130,246,0.3);">
       <p id="updateBannerText" style="font-size:11px; color:#93c5fd; line-height:1.4; margin:0 0 6px;"></p>
-      <button id="downloadUpdateBtn" style="width:100%; height:26px; border-radius:6px; border:none; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; cursor:pointer;">Download latest version</button>
+      <button id="downloadUpdateBtn" style="width:100%; height:26px; border-radius:6px; border:none; background:#3b82f6; color:#fff; font-size:11px; font-weight:700; cursor:pointer;">Update now</button>
+      <a id="downloadUpdateManualLink" href="#" style="display:none; margin-top:4px; font-size:10px; color:#93c5fd; text-align:center;">Download the installer manually instead</a>
     </div>
 
     <!-- Waiting-for-sign-in panel — shown instead of everything below when not yet authenticated -->
@@ -445,8 +454,9 @@
           </select>
         </div>
         <div class="modal-field">
-          <label>Details (optional)</label>
+          <label id="earlyEndDetailsLabel">Details (optional)</label>
           <textarea id="earlyEndDetails" rows="2" placeholder="Add more context…"></textarea>
+          <span class="modal-field-hint" id="earlyEndDetailsHint" style="display:none"></span>
         </div>
         <button class="btn btn-red" id="earlyEndSubmitBtn" disabled>Submit &amp; End Shift</button>
         <button class="btn btn-resume" id="earlyEndCancelBtn">Resume Shift</button>
@@ -506,9 +516,8 @@
 
     const fmtMDT = (iso) => {
       if (!iso) return '—';
-      const MDT = -6 * 60 * 60 * 1000;
-      return new Date(new Date(iso).getTime() + MDT).toLocaleTimeString('en-US', {
-        hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC',
+      return new Date(iso).toLocaleTimeString('en-US', {
+        hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'America/Denver',
       });
     };
 
@@ -553,11 +562,41 @@
       document.getElementById('screenRecordingBanner').style.display = s.screenRecordingGranted === false ? '' : 'none';
       document.getElementById('idleRecordingBadge').style.display = s.idleRecordingActive ? 'flex' : 'none';
 
+      document.getElementById('standbyBanner').style.display = s.standby ? '' : 'none';
+
       const updateBanner = document.getElementById('updateBanner');
       updateBanner.style.display = s.updateAvailable ? '' : 'none';
       if (s.updateAvailable) {
-        document.getElementById('updateBannerText').textContent =
-          `New version ${s.updateAvailable.version} is available. Download it, close this app, then run the installer.`;
+        const progress = s.updateProgress;
+        const updateBtn = document.getElementById('downloadUpdateBtn');
+        const manualLink = document.getElementById('downloadUpdateManualLink');
+        const isMac = s.platform === 'darwin' || navigator.platform.toLowerCase().includes('mac');
+        let text = isMac
+          ? `New version ${s.updateAvailable.version} is available. Click Update now to download it — the installer will open for you.`
+          : `New version ${s.updateAvailable.version} is available. Click Update now — it downloads and installs by itself, then the app reopens.`;
+        let label = 'Update now';
+        let busy = false;
+        if (progress && progress.stage === 'downloading') {
+          text = progress.percent === null ? 'Downloading the update…' : `Downloading the update… ${progress.percent}%`;
+          label = 'Downloading…';
+          busy = true;
+        } else if (progress && progress.stage === 'installing') {
+          text = 'Installing the update. The app will close and reopen in a moment.';
+          label = 'Installing…';
+          busy = true;
+        } else if (progress && progress.stage === 'opened') {
+          text = 'The installer is open. Drag Suprah AI - Timeproof Clock into Applications and replace the old one.';
+          label = 'Open installer again';
+        } else if (progress && progress.stage === 'error') {
+          text = 'The update could not be downloaded. Check your internet connection and try again.';
+          label = 'Try again';
+        }
+        document.getElementById('updateBannerText').textContent = text;
+        updateBtn.textContent = label;
+        updateBtn.disabled = busy;
+        updateBtn.style.opacity = busy ? '0.6' : '1';
+        updateBtn.style.cursor = busy ? 'default' : 'pointer';
+        manualLink.style.display = progress && progress.stage === 'error' ? 'block' : 'none';
       }
 
       // Not signed in yet — show the waiting panel only, hide everything shift-related.
@@ -762,6 +801,7 @@
     });
 
     const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
+    const OTHER_REASON_MIN_CHARS = 10;
 
     // Must match updateWorkTimer's formula (and main.ts getRenderedMsSoFar) exactly.
 // Avoids under-reporting from state.todayTotalActiveMs/state.activityStartMs,
@@ -785,7 +825,7 @@
         document.getElementById('earlyEndWorked').textContent = fmtWorked(workedMs);
         document.getElementById('earlyEndReason').value = '';
         document.getElementById('earlyEndDetails').value = '';
-        document.getElementById('earlyEndSubmitBtn').disabled = true;
+        refreshEarlyEndForm();
         document.getElementById('earlyEndModal').classList.add('visible');
       } else {
         document.getElementById('confirmWorked').textContent = fmtWorked(workedMs);
@@ -793,14 +833,42 @@
       }
     });
 
-    // Early end: enable submit only when reason is selected
-    document.getElementById('earlyEndReason').addEventListener('change', (e) => {
-      document.getElementById('earlyEndSubmitBtn').disabled = !e.target.value;
-    });
+    function earlyEndFormState() {
+      const reason = document.getElementById('earlyEndReason').value;
+      const detailsLength = document.getElementById('earlyEndDetails').value.trim().length;
+      const isOther = reason === 'Other';
+      const needsMore = isOther && detailsLength < OTHER_REASON_MIN_CHARS;
+      return { reason, detailsLength, isOther, needsMore };
+    }
+
+    function refreshEarlyEndForm() {
+      const { reason, detailsLength, isOther, needsMore } = earlyEndFormState();
+      const label = document.getElementById('earlyEndDetailsLabel');
+      const textarea = document.getElementById('earlyEndDetails');
+      const hint = document.getElementById('earlyEndDetailsHint');
+      if (isOther) {
+        label.innerHTML = 'Type your reason <span style="color:#f87171">*</span>';
+        textarea.placeholder = `Tell us why you need to end early (at least ${OTHER_REASON_MIN_CHARS} characters)…`;
+        hint.style.display = '';
+        hint.classList.toggle('ok', !needsMore);
+        hint.textContent = needsMore
+          ? `${detailsLength}/${OTHER_REASON_MIN_CHARS} characters — please type at least ${OTHER_REASON_MIN_CHARS} characters.`
+          : `${detailsLength} characters — good to go.`;
+      } else {
+        label.textContent = 'Details (optional)';
+        textarea.placeholder = 'Add more context…';
+        hint.style.display = 'none';
+      }
+      textarea.classList.toggle('needs-more', needsMore && detailsLength > 0);
+      document.getElementById('earlyEndSubmitBtn').disabled = !reason || needsMore;
+    }
+
+    document.getElementById('earlyEndReason').addEventListener('change', refreshEarlyEndForm);
+    document.getElementById('earlyEndDetails').addEventListener('input', refreshEarlyEndForm);
 
     document.getElementById('earlyEndSubmitBtn').addEventListener('click', async () => {
-      const reason = document.getElementById('earlyEndReason').value;
-      if (!reason) return;
+      const { reason, needsMore } = earlyEndFormState();
+      if (!reason || needsMore) return;
       const details = document.getElementById('earlyEndDetails').value.trim();
       const note = details ? `${reason} — ${details}` : reason;
       const btn = document.getElementById('earlyEndSubmitBtn');
@@ -808,8 +876,8 @@
       btn.textContent = 'Ending…';
       const result = await window.trayAPI.timeclockAction('time-out', note);
       if (!result.success) {
-        btn.disabled = false;
         btn.textContent = 'Submit & End Shift';
+        refreshEarlyEndForm();
         showMsg(result.error || 'Failed', true);
       } else {
         document.getElementById('earlyEndModal').classList.remove('visible');
@@ -861,6 +929,11 @@
 
     document.getElementById('downloadUpdateBtn').addEventListener('click', () => {
       window.trayAPI.downloadUpdate();
+    });
+
+    document.getElementById('downloadUpdateManualLink').addEventListener('click', (e) => {
+      e.preventDefault();
+      window.trayAPI.downloadUpdateManually();
     });
 
     document.getElementById('signOutBtn').addEventListener('click', async () => {

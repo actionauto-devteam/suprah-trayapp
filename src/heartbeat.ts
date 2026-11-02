@@ -1,9 +1,10 @@
 import axios from 'axios';
-import { app } from 'electron';
+import { app, powerMonitor } from 'electron';
 import { getIsIdle } from './idle';
 import { getScreenRecordingGranted } from './permissions';
 import { reportDiagnostic } from './screenshot';
 import { isAuthRejection } from './session';
+import { isTrayStandbyRejection } from './trayIdentity';
 
 const INTERVAL_MS = 60_000;
 const PING_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
@@ -17,6 +18,11 @@ let _activeToken = '';
 let lastPingFailReportedAt = 0;
 let _onScreenshotsRequired: ((required: boolean) => void) | null = null;
 let _onAuthRejected: ((rejectedToken: string) => void) | null = null;
+let _onStandbyChange: ((standby: boolean) => void) | null = null;
+
+export function setOnStandbyChange(cb: (standby: boolean) => void): void {
+  _onStandbyChange = cb;
+}
 
 export function setOnScreenshotsRequired(cb: (required: boolean) => void): void {
   _onScreenshotsRequired = cb;
@@ -49,12 +55,18 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
           isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt,
           screenRecordingGranted: getScreenRecordingGranted(),
           appVersion: app.getVersion(),
+          inputAgeSec: Math.round(powerMonitor.getSystemIdleTime()),
         },
         { headers: { Authorization: `Bearer ${usedToken}` }, timeout: 10_000 }
       );
+      _onStandbyChange?.(false);
       const screenshotsRequired = (res.data?.data ?? res.data)?.screenshotsRequired;
       if (typeof screenshotsRequired === 'boolean') _onScreenshotsRequired?.(screenshotsRequired);
     } catch (err) {
+      if (isTrayStandbyRejection(err)) {
+        _onStandbyChange?.(true);
+        return;
+      }
       if (isAuthRejection(err)) {
         _onAuthRejected?.(usedToken);
         return;
@@ -89,5 +101,6 @@ export function stopHeartbeat(): void {
   _activeToken = '';
   _onScreenshotsRequired = null;
   _onAuthRejected = null;
+  _onStandbyChange = null;
   heartbeatPath = '/api/crm/timeproof/heartbeat';
 }
