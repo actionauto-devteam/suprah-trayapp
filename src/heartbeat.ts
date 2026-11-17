@@ -9,7 +9,7 @@ import { isTrayStandbyRejection } from './trayIdentity';
 const INTERVAL_MS = 60_000;
 const PING_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
 
-type ShiftState = { isOnBreak: boolean; breakDurationSeconds: number; isOnShift: boolean; currentIntervalStartAt: string | null };
+type ShiftState = { isOnBreak: boolean; breakDurationSeconds: number; isOnShift: boolean; currentIntervalStartAt: string | null; unsentActivitySince: string | null };
 
 let intervalId: ReturnType<typeof setInterval> | null = null;
 let _ping: (() => Promise<void>) | null = null;
@@ -47,12 +47,12 @@ export function startHeartbeat(apiUrl: string, token: string, getShiftState: () 
   _ping = async () => {
     const usedToken = _activeToken;
     try {
-      const { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt } = getShiftState();
+      const { isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt, unsentActivitySince } = getShiftState();
       const isIdle = isOnBreak || !isOnShift ? false : getIsIdle();
       const res = await axios.post(
         `${apiUrl}${heartbeatPath}`,
         {
-          isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt,
+          isIdle, platform: process.platform, isOnBreak, breakDurationSeconds, isOnShift, currentIntervalStartAt, unsentActivitySince,
           screenRecordingGranted: getScreenRecordingGranted(),
           appVersion: app.getVersion(),
           inputAgeSec: Math.round(powerMonitor.getSystemIdleTime()),

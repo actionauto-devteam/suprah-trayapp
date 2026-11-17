@@ -18,11 +18,12 @@ import { startIdleMonitor, stopIdleMonitor, setIdleDetectionExempt, getIdleSecon
 import { companyDayStartUtcMs } from './companyTime';
 import { startHeartbeat, stopHeartbeat, pingHeartbeat, setHeartbeatPath, updateHeartbeatToken, setOnScreenshotsRequired, setOnAuthRejected, setOnStandbyChange } from './heartbeat';
 import { startScreenshots, stopScreenshots, isScreenshotRunning, captureAndUploadOnce, setCaptureFailedCallback, setCaptureSucceededCallback, setOnBreakGetter, setSkipCaptures, setScreenshotStandby, setMainMonitorOnly, reportDiagnostic, updateScreenshotToken, toShiftDate } from './screenshot';
-import { getOrCreateTrayId, installTrayIdentity, isTrayStandbyRejection, setStandbyRejectedHandler } from './trayIdentity';
+import { getOrCreateTrayId, installTrayIdentity, setStandbyRejectedHandler } from './trayIdentity';
 import { flushQueue } from './offline-queue';
 import { getScreenRecordingGranted, openScreenRecordingSettings } from './permissions';
 import { startIdleRecording, stopAndUploadIdleRecording, stopAndDiscardIdleRecording, destroyIdleRecorderWindow, registerIdleRecordingIpcHandlers, getIdleRecordingStatus } from './idleRecording';
 import { flushIdleRecordingQueue } from './idleRecordingQueue';
+import { enqueueActivity, flushActivityQueue, latestUnsentActivityEndMs, oldestUnsentActivityStart } from './activityQueue';
 import { SESSION_CHECK_INTERVAL_MS, TOKEN_REFRESH_WINDOW_MS, isAuthRejection, isStaleSameUserToken, probeToken, readTokenClaims, refreshToken, shouldRefreshNow } from './session';
 import { isNewerVersion } from './version';
 import { buildAllowedOrigins, matchOrigin } from './originPolicy';
@@ -948,25 +949,7 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
         const stopAt = agentState.breakStartedAt
           ? new Date(agentState.breakStartedAt).getTime()
           : Date.now();
-        const durationMs = Math.max(0, stopAt - activityStartMs);
-        const tkn = store.get("crm_token") as string | undefined;
-        if (tkn && durationMs >= 30_000) {
-          axios
-            .post(
-              `${API_URL}${getActivityIntervalUrl()}`,
-              {
-                startAt: new Date(activityStartMs).toISOString(),
-                endAt: new Date(stopAt).toISOString(),
-              },
-              { headers: { Authorization: `Bearer ${tkn}` }, timeout: 10_000 },
-            )
-            .then(() => {
-              todayTotalActiveMs += durationMs;
-              agentState.todayTotalActiveMs = todayTotalActiveMs;
-              broadcastState();
-            })
-            .catch(() => {});
-        }
+        saveActivityBlock(activityStartMs, stopAt);
         activityStartMs = null;
         agentState.activityStartMs = null;
         stopScreenshots();
@@ -1010,6 +993,10 @@ const syncShiftState = async (token: string, retries = 3): Promise<void> => {
             activityStartMs = serverIntervalStart;
           } else {
             activityStartMs = Date.now();
+          }
+          const unsentEndMs = latestUnsentActivityEndMs(currentTokenUserId());
+          if (unsentEndMs !== null && unsentEndMs > activityStartMs && unsentEndMs <= Date.now()) {
+            activityStartMs = unsentEndMs;
           }
           agentState.activityStartMs = activityStartMs;
           startScreenshots(API_URL, token);
@@ -1060,14 +1047,49 @@ const IDLE_STRETCH_BACKDATE_CAP_MS = (IDLE_THRESHOLD_SEC + 60) * 1000;
 const IDLE_VIDEO_BOOKEND_MS = 2 * 60 * 1000;
 const IDLE_STAGE_WINDOW_MS = 600_000;
 
-/**
- * Commit current active segment (activityStartMs → endAt) into todayTotalActiveMs.
- * Ensures long continuous activity isn’t lost on crash/restart by periodic checkpoints.
- * Returns true if committed or nothing to commit; false only if POST failed —
- * callers must check before rolling activityStartMs forward to avoid discarding time.
- */
 let lastCheckpointFailReportedAt = 0;
 const CHECKPOINT_FAIL_REPORT_COOLDOWN_MS = 10 * 60 * 1000;
+
+const currentTokenUserId = (): string | null => {
+  const token = store.get('crm_token') as string | undefined;
+  return token ? readTokenClaims(token)?.userId ?? null : null;
+};
+
+const sendQueuedActivity = (): void => {
+  const token = store.get('crm_token') as string | undefined;
+  const userId = token ? readTokenClaims(token)?.userId ?? null : null;
+  if (!token || !userId) return;
+  flushActivityQueue(API_URL, token, userId)
+    .then((result) => {
+      if (result.standby) handleStandbyChange(true);
+      if (!result.failed) return;
+      const now = Date.now();
+      if (now - lastCheckpointFailReportedAt <= CHECKPOINT_FAIL_REPORT_COOLDOWN_MS) return;
+      lastCheckpointFailReportedAt = now;
+      reportDiagnostic('activity_checkpoint_failed', 'Activity-interval upload failed — kept on this computer for retry', {
+        status: result.failed.status,
+        message: result.failed.message,
+        unsentCount: result.remaining,
+      });
+    })
+    .catch(() => {});
+};
+
+const saveActivityBlock = (startMs: number, endMs: number): void => {
+  if (agentState.standby || endMs - startMs < 30_000) return;
+  const userId = currentTokenUserId();
+  if (!userId) return;
+  enqueueActivity({
+    userId,
+    url: getActivityIntervalUrl(),
+    startAt: new Date(startMs).toISOString(),
+    endAt: new Date(endMs).toISOString(),
+  });
+  todayTotalActiveMs += endMs - startMs;
+  agentState.todayTotalActiveMs = todayTotalActiveMs;
+  broadcastState();
+  sendQueuedActivity();
+};
 
 const commitActiveSegment = async (endAtRaw: Date): Promise<boolean> => {
   if (activityStartMs === null) return true;
@@ -1086,34 +1108,8 @@ const commitActiveSegment = async (endAtRaw: Date): Promise<boolean> => {
       activityStartMs,
     });
   }
-  const currentToken = store.get('crm_token') as string | undefined;
-  const durationMs = endAt.getTime() - activityStartMs;
-  if (!currentToken || durationMs < 30_000) return true;
-  try {
-    await axios.post(
-      `${API_URL}${getActivityIntervalUrl()}`,
-      { startAt: new Date(activityStartMs).toISOString(), endAt: endAt.toISOString() },
-      { headers: { Authorization: `Bearer ${currentToken}` }, timeout: 10_000 }
-    );
-    todayTotalActiveMs += durationMs;
-    agentState.todayTotalActiveMs = todayTotalActiveMs;
-    return true;
-  } catch (err) {
-    if (isTrayStandbyRejection(err)) {
-      handleStandbyChange(true);
-      return true;
-    }
-    const now = Date.now();
-    if (now - lastCheckpointFailReportedAt > CHECKPOINT_FAIL_REPORT_COOLDOWN_MS) {
-      lastCheckpointFailReportedAt = now;
-      const axiosErr = err as { response?: { status?: number }; message?: string };
-      reportDiagnostic('activity_checkpoint_failed', 'Activity-interval checkpoint POST failed', {
-        status: axiosErr?.response?.status ?? null,
-        message: axiosErr?.message ?? String(err),
-      });
-    }
-    return false;
-  }
+  saveActivityBlock(activityStartMs, endAt.getTime());
+  return true;
 };
 
 const CAPTURE_RETRY_ATTEMPTS = 3;
@@ -1571,6 +1567,7 @@ const startAgentServices = async (token: string) => {
       breakDurationSeconds,
       isOnShift,
       currentIntervalStartAt,
+      unsentActivitySince: oldestUnsentActivityStart(currentTokenUserId()),
     };
   });
 
@@ -1659,29 +1656,7 @@ const startAgentServices = async (token: string) => {
       if (wasTracking && !isNowTracking) {
         // Clocked out or went on break — save the current active interval (fire-and-forget)
         if (activityStartMs !== null) {
-          const endAt = new Date();
-          const durationMs = endAt.getTime() - activityStartMs;
-          const currentToken = store.get("crm_token") as string | undefined;
-          if (currentToken && durationMs >= 30_000) {
-            axios
-              .post(
-                `${API_URL}${getActivityIntervalUrl()}`,
-                {
-                  startAt: new Date(activityStartMs).toISOString(),
-                  endAt: endAt.toISOString(),
-                },
-                {
-                  headers: { Authorization: `Bearer ${currentToken}` },
-                  timeout: 10_000,
-                },
-              )
-              .then(() => {
-                todayTotalActiveMs += durationMs;
-                agentState.todayTotalActiveMs = todayTotalActiveMs;
-                broadcastState();
-              })
-              .catch(() => {});
-          }
+          saveActivityBlock(activityStartMs, Date.now());
           activityStartMs = null;
           agentState.activityStartMs = null;
         }
@@ -1749,6 +1724,7 @@ const startAgentServices = async (token: string) => {
   // explicitly clicks Resume to opt back into tracking.
   await syncShiftState(token);
   if (!agentServicesStarted) return;
+  sendQueuedActivity();
   if (activityStartMs !== null) {
     // syncShiftState set activityStartMs (recent shift) — propagate to the server
     pingHeartbeat();
@@ -1760,6 +1736,7 @@ const startAgentServices = async (token: string) => {
   resyncIntervalId = setInterval(safeAsync(async () => {
     const currentToken = store.get("crm_token") as string | undefined;
     if (currentToken) await syncShiftState(currentToken);
+    sendQueuedActivity();
     if (currentToken && agentState.user?.idleVideoProofEnabled) {
       flushIdleRecordingQueue(API_URL, currentToken).catch(() => {});
     }
